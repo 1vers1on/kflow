@@ -245,6 +245,16 @@ and testing patterns.
 
 ---
 
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [docs/configuration.md](docs/configuration.md) | Complete YAML reference - every field in the root config, resource definitions, and all ten step types. |
+| [docs/cli.md](docs/cli.md) | Full CLI reference - every command, every flag, targeting behaviour, exit codes. |
+| [docs/writing-runners.md](docs/writing-runners.md) | Runner authoring guide - lifecycle hooks, `RunnerContext` API, dry-run rules, helpers, testing. |
+
+---
+
 ## State
 
 kflow keeps a small local JSON store under `state.dir`, keyed by kube-context:

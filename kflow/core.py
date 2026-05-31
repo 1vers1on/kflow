@@ -33,7 +33,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import click
 import yaml
@@ -45,7 +45,7 @@ from rich import box
 
 from .runners import KubeClient, RunnerContext, RunnerRegistry
 from .runners.registry import RunnerLoadError
-from .runners.shell import CommandError
+from .runners.shell import CommandError, run_command
 
 __version__ = "0.1.0"
 
@@ -97,13 +97,89 @@ class RunnerSpec:
 
 
 @dataclass
+class KustomizeSpec:
+    path: Path
+
+
+@dataclass
+class WaitSpec:
+    for_resource: str
+    condition: Optional[str] = None   # --for=condition=X (e.g. "available")
+    jsonpath: Optional[str] = None    # --for=jsonpath='{...}' (kubectl >= 1.23)
+    namespace: Optional[str] = None
+    timeout: int = 120
+
+
+@dataclass
+class ScriptSpec:
+    run: str
+    on_destroy: Optional[str] = None  # None = skip on destroy
+    on_reload: Optional[str] = None   # None = re-run `run`
+    workdir: Optional[Path] = None
+
+
+@dataclass
+class SecretSpec:
+    """Declaratively create or upsert a Kubernetes generic Secret."""
+    name: Optional[str] = None          # defaults to the step name
+    namespace: Optional[str] = None     # defaults to the resource namespace
+    literals: dict = field(default_factory=dict)         # key: value
+    from_env: dict = field(default_factory=dict)         # key: ENV_VAR_NAME
+    from_files: List[str] = field(default_factory=list)  # "path" or "key=path"
+    from_env_file: Optional[Path] = None
+    if_not_exists: bool = False  # skip if the secret already exists in the cluster
+
+
+@dataclass
+class ConfigMapSpec:
+    """Declaratively create or upsert a Kubernetes ConfigMap."""
+    name: Optional[str] = None
+    namespace: Optional[str] = None
+    literals: dict = field(default_factory=dict)
+    from_files: List[str] = field(default_factory=list)  # "path" or "key=path"
+    from_dir: Optional[Path] = None    # pass a whole directory to --from-file
+    if_not_exists: bool = False
+
+
+@dataclass
+class ExecSpec:
+    """Run a command inside a pod."""
+    command: List[str]
+    pod: Optional[str] = None       # literal pod name
+    selector: Optional[str] = None  # label selector; picks first running pod
+    container: Optional[str] = None
+    on_destroy: Optional[List[str]] = None  # None = skip on destroy
+    on_reload: Optional[List[str]] = None   # None = re-run command
+
+
+@dataclass
+class DockerBuildSpec:
+    """Build (and optionally push) a Docker image."""
+    context: Path
+    tag: str
+    file: Optional[Path] = None      # path to Dockerfile
+    build_args: dict = field(default_factory=dict)
+    push: bool = False
+    platform: Optional[str] = None   # e.g. "linux/amd64,linux/arm64"
+    target: Optional[str] = None     # multi-stage --target
+
+
+@dataclass
 class StepDef:
     name: str
-    kind: str  # "manifest" | "helm" | "runner"
+    kind: str  # manifest | helm | kustomize | wait | script | runner |
+               # secret | configmap | exec | docker-build
     depends_on: List[str] = field(default_factory=list)
-    manifests: List[Path] = field(default_factory=list)
+    manifests: List[Union[Path, str]] = field(default_factory=list)  # Path or URL
     helm: Optional[HelmSpec] = None
+    kustomize: Optional[KustomizeSpec] = None
+    wait: Optional[WaitSpec] = None
+    script: Optional[ScriptSpec] = None
     runner: Optional[RunnerSpec] = None
+    secret: Optional[SecretSpec] = None
+    configmap: Optional[ConfigMapSpec] = None
+    exec_spec: Optional[ExecSpec] = None
+    docker_build: Optional[DockerBuildSpec] = None
 
 
 @dataclass
@@ -210,9 +286,16 @@ def _resolve(base: Path, value: str) -> Path:
     return p if p.is_absolute() else (base / p).resolve()
 
 
-def file_hash(path: Path) -> Optional[str]:
+def _is_url(value) -> bool:
+    return str(value).startswith(("http://", "https://"))
+
+
+def file_hash(path) -> Optional[str]:
+    p = str(path)
+    if _is_url(p):
+        return None  # remote resources can't be hashed locally
     try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+        return hashlib.sha256(Path(p).read_bytes()).hexdigest()[:16]
     except OSError:
         return None
 
@@ -252,6 +335,142 @@ def _parse_runner(spec: dict, base: Path, resource_name: str) -> RunnerSpec:
     )
 
 
+def _parse_kustomize(spec: dict, base: Path, resource_name: str) -> KustomizeSpec:
+    if "path" not in spec:
+        raise ConfigError(f"kustomize block for {resource_name!r} is missing 'path'")
+    return KustomizeSpec(path=_resolve(base, spec["path"]))
+
+
+def _parse_wait(spec: dict, resource_name: str) -> WaitSpec:
+    if "for" not in spec:
+        raise ConfigError(f"wait block for {resource_name!r} is missing 'for'")
+    condition = spec.get("condition")
+    jsonpath = spec.get("jsonpath")
+    if not condition and not jsonpath:
+        raise ConfigError(
+            f"wait block for {resource_name!r} requires 'condition' or 'jsonpath'"
+        )
+    return WaitSpec(
+        for_resource=spec["for"],
+        condition=condition,
+        jsonpath=jsonpath,
+        namespace=spec.get("namespace"),
+        timeout=int(spec.get("timeout", 120)),
+    )
+
+
+def _parse_script(spec: dict, base: Path, resource_name: str) -> ScriptSpec:
+    if "run" not in spec:
+        raise ConfigError(f"script block for {resource_name!r} is missing 'run'")
+    workdir_raw = spec.get("workdir")
+    return ScriptSpec(
+        run=spec["run"],
+        on_destroy=spec.get("onDestroy"),
+        on_reload=spec.get("onReload"),
+        workdir=_resolve(base, workdir_raw) if workdir_raw else None,
+    )
+
+
+def _parse_manifests(specs: list, base: Path) -> List[Union[Path, str]]:
+    result: List[Union[Path, str]] = []
+    for m in specs:
+        s = str(m)
+        if _is_url(s):
+            result.append(s)
+        else:
+            result.append(_resolve(base, s))
+    return result
+
+
+def _parse_secret(spec: dict, base: Path, resource_name: str, step_name: str) -> SecretSpec:
+    from_files: List[str] = []
+    for entry in (spec.get("fromFiles") or []):
+        s = str(entry)
+        if "=" in s:
+            key, _, path_part = s.partition("=")
+            from_files.append(f"{key}={_resolve(base, path_part)}")
+        else:
+            from_files.append(str(_resolve(base, s)))
+    env_file_raw = spec.get("fromEnvFile")
+    return SecretSpec(
+        name=spec.get("name"),
+        namespace=spec.get("namespace"),
+        literals=dict(spec.get("literals") or {}),
+        from_env=dict(spec.get("fromEnv") or {}),
+        from_files=from_files,
+        from_env_file=_resolve(base, env_file_raw) if env_file_raw else None,
+        if_not_exists=bool(spec.get("ifNotExists", False)),
+    )
+
+
+def _parse_configmap(spec: dict, base: Path, resource_name: str, step_name: str) -> ConfigMapSpec:
+    from_files: List[str] = []
+    for entry in (spec.get("fromFiles") or []):
+        s = str(entry)
+        if "=" in s:
+            key, _, path_part = s.partition("=")
+            from_files.append(f"{key}={_resolve(base, path_part)}")
+        else:
+            from_files.append(str(_resolve(base, s)))
+    from_dir_raw = spec.get("fromDir")
+    return ConfigMapSpec(
+        name=spec.get("name"),
+        namespace=spec.get("namespace"),
+        literals=dict(spec.get("literals") or {}),
+        from_files=from_files,
+        from_dir=_resolve(base, from_dir_raw) if from_dir_raw else None,
+        if_not_exists=bool(spec.get("ifNotExists", False)),
+    )
+
+
+def _parse_exec(spec: dict, resource_name: str) -> ExecSpec:
+    command = spec.get("command")
+    if not command:
+        raise ConfigError(f"exec block for {resource_name!r} is missing 'command'")
+    if isinstance(command, str):
+        command = ["sh", "-c", command]
+
+    pod = spec.get("pod")
+    selector = spec.get("selector")
+    if not pod and not selector:
+        raise ConfigError(
+            f"exec block for {resource_name!r} requires 'pod' or 'selector'"
+        )
+
+    def _coerce_cmd(raw) -> Optional[List[str]]:
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return ["sh", "-c", raw] if raw else None
+        return list(raw) if raw else None
+
+    return ExecSpec(
+        command=list(command),
+        pod=pod,
+        selector=selector,
+        container=spec.get("container"),
+        on_destroy=_coerce_cmd(spec.get("onDestroy")),
+        on_reload=_coerce_cmd(spec.get("onReload")),
+    )
+
+
+def _parse_docker_build(spec: dict, base: Path, resource_name: str) -> DockerBuildSpec:
+    if "context" not in spec:
+        raise ConfigError(f"dockerBuild block for {resource_name!r} is missing 'context'")
+    if "tag" not in spec:
+        raise ConfigError(f"dockerBuild block for {resource_name!r} is missing 'tag'")
+    file_raw = spec.get("file")
+    return DockerBuildSpec(
+        context=_resolve(base, spec["context"]),
+        tag=spec["tag"],
+        file=_resolve(base, file_raw) if file_raw else None,
+        build_args=dict(spec.get("buildArgs") or {}),
+        push=bool(spec.get("push", False)),
+        platform=spec.get("platform"),
+        target=spec.get("target"),
+    )
+
+
 def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> StepDef:
     name = spec.get("name")
     if not name:
@@ -259,16 +478,38 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     depends_on = list(spec.get("dependsOn") or [])
     if spec.get("manifests"):
         return StepDef(name=name, kind="manifest", depends_on=depends_on,
-                       manifests=[_resolve(base, m) for m in spec["manifests"]])
+                       manifests=_parse_manifests(spec["manifests"], base))
     if spec.get("helm"):
         return StepDef(name=name, kind="helm", depends_on=depends_on,
                        helm=_parse_helm(spec["helm"], default_ns, base, resource_name))
+    if spec.get("kustomize"):
+        return StepDef(name=name, kind="kustomize", depends_on=depends_on,
+                       kustomize=_parse_kustomize(spec["kustomize"], base, resource_name))
+    if spec.get("wait"):
+        return StepDef(name=name, kind="wait", depends_on=depends_on,
+                       wait=_parse_wait(spec["wait"], resource_name))
+    if spec.get("script"):
+        return StepDef(name=name, kind="script", depends_on=depends_on,
+                       script=_parse_script(spec["script"], base, resource_name))
     if spec.get("runner"):
         return StepDef(name=name, kind="runner", depends_on=depends_on,
                        runner=_parse_runner(spec["runner"], base, resource_name))
+    if spec.get("secret"):
+        return StepDef(name=name, kind="secret", depends_on=depends_on,
+                       secret=_parse_secret(spec["secret"], base, resource_name, name))
+    if spec.get("configmap"):
+        return StepDef(name=name, kind="configmap", depends_on=depends_on,
+                       configmap=_parse_configmap(spec["configmap"], base, resource_name, name))
+    if spec.get("exec"):
+        return StepDef(name=name, kind="exec", depends_on=depends_on,
+                       exec_spec=_parse_exec(spec["exec"], resource_name))
+    if spec.get("dockerBuild"):
+        return StepDef(name=name, kind="docker-build", depends_on=depends_on,
+                       docker_build=_parse_docker_build(spec["dockerBuild"], base, resource_name))
     raise ConfigError(
-        f"step {name!r} in {resource_name!r} must define one of "
-        "'manifests', 'helm' or 'runner'"
+        f"step {name!r} in {resource_name!r} must define one of: "
+        "manifests, helm, kustomize, wait, script, runner, "
+        "secret, configmap, exec, dockerBuild"
     )
 
 
@@ -280,24 +521,6 @@ def _build_resource(doc: dict, source: Path) -> ResourceDef:
     namespace = doc.get("namespace", "default")
     steps: List[StepDef] = []
 
-    # Shorthand top-level action fields become steps in a stable order.
-    if doc.get("manifests"):
-        steps.append(StepDef(
-            name="manifests", kind="manifest",
-            manifests=[_resolve(base, m) for m in doc["manifests"]],
-        ))
-    if doc.get("helm"):
-        steps.append(StepDef(
-            name="helm", kind="helm",
-            helm=_parse_helm(doc["helm"], namespace, base, name),
-        ))
-    for rspec in (doc.get("runners") or []):
-        rs = _parse_runner(rspec, base, name)
-        steps.append(StepDef(name=rspec.get("name") or rs.class_name,
-                             kind="runner", runner=rs,
-                             depends_on=list(rspec.get("dependsOn") or [])))
-
-    # Explicit fine-grained steps (full control over intra-resource ordering).
     for sspec in (doc.get("steps") or []):
         steps.append(_parse_step(sspec, namespace, base, name))
 
@@ -494,6 +717,8 @@ class DependencyGraph:
 
     def _first_node(self, resource_name: str) -> str:
         res = self.resources[resource_name]
+        if not res.steps:
+            raise ConfigError(f"resource {resource_name!r} has no steps")
         return self.node_id(resource_name, res.steps[0].name)
 
     def _build_edges(self) -> None:
@@ -668,8 +893,25 @@ class StateManager:
             elif step.kind == "helm" and step.helm:
                 steps[step.name] = {"kind": "helm", "release": step.helm.release}
                 entry["helm_release"] = step.helm.release
+            elif step.kind == "kustomize" and step.kustomize:
+                steps[step.name] = {"kind": "kustomize", "path": str(step.kustomize.path)}
+            elif step.kind == "wait":
+                steps[step.name] = {"kind": "wait"}
+            elif step.kind == "script":
+                steps[step.name] = {"kind": "script"}
             elif step.kind == "runner" and step.runner:
                 steps[step.name] = {"kind": "runner", "class": step.runner.class_name}
+            elif step.kind == "secret" and step.secret:
+                steps[step.name] = {"kind": "secret",
+                                    "name": step.secret.name or step.name}
+            elif step.kind == "configmap" and step.configmap:
+                steps[step.name] = {"kind": "configmap",
+                                    "name": step.configmap.name or step.name}
+            elif step.kind == "exec":
+                steps[step.name] = {"kind": "exec"}
+            elif step.kind == "docker-build" and step.docker_build:
+                steps[step.name] = {"kind": "docker-build",
+                                    "tag": step.docker_build.tag}
         entry["steps"] = steps
 
     def record_operation(self, name: str, operation: str) -> None:
@@ -691,8 +933,11 @@ class StateManager:
             recorded = (entry.get("steps", {}).get(step.name, {})
                         .get("manifests", {}))
             for m in step.manifests:
-                if recorded.get(str(m)) != file_hash(m):
-                    changed.append(str(m))
+                key = str(m)
+                if _is_url(key):
+                    continue  # remote resources can't be checked for drift
+                if recorded.get(key) != file_hash(m):
+                    changed.append(key)
         return changed
 
     def save(self) -> None:
@@ -785,6 +1030,11 @@ class Kflow:
             f"[dim].{step.name}[/dim] [dim]({step.kind})[/dim]"
         )
 
+    def _check_wait_result(self, result) -> None:
+        if not result.skipped and result.returncode != 0:
+            raise CommandError(result.cmd, result.returncode,
+                               result.stdout, result.stderr)
+
     def _apply_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "apply")
         if step.kind == "manifest":
@@ -792,12 +1042,34 @@ class Kflow:
                 self.kube.apply_file(m, namespace=resource.namespace)
         elif step.kind == "helm" and step.helm:
             self._helm_upgrade(step.helm)
+        elif step.kind == "kustomize" and step.kustomize:
+            self.kube.apply_kustomize(step.kustomize.path)
+        elif step.kind == "wait" and step.wait:
+            ns = step.wait.namespace or resource.namespace
+            result = self.kube.wait_for(
+                step.wait.for_resource,
+                step.wait.condition,
+                namespace=ns,
+                timeout=step.wait.timeout,
+                jsonpath=step.wait.jsonpath,
+            )
+            self._check_wait_result(result)
+        elif step.kind == "script" and step.script:
+            self._run_script(resource, step.script, step.script.run)
         elif step.kind == "runner" and step.runner:
             runner = self.registry.instantiate(step.runner.class_name, step.runner.config)
             ctx = self._runner_ctx(resource, step, "apply")
             runner.pre_apply(ctx)
             runner.apply(ctx)
             runner.post_apply(ctx)
+        elif step.kind == "secret" and step.secret:
+            self._apply_secret(resource, step)
+        elif step.kind == "configmap" and step.configmap:
+            self._apply_configmap(resource, step)
+        elif step.kind == "exec" and step.exec_spec:
+            self._exec_step(resource, step.exec_spec, step.exec_spec.command)
+        elif step.kind == "docker-build" and step.docker_build:
+            self._run_docker_build(resource, step.docker_build)
 
     def _destroy_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "destroy")
@@ -806,12 +1078,33 @@ class Kflow:
                 self.kube.delete_file(m, namespace=resource.namespace)
         elif step.kind == "helm" and step.helm:
             self.kube.helm_uninstall(step.helm.release, step.helm.namespace)
+        elif step.kind == "kustomize" and step.kustomize:
+            self.kube.delete_kustomize(step.kustomize.path)
+        elif step.kind == "wait":
+            pass  # nothing to undo for a wait step
+        elif step.kind == "script" and step.script and step.script.on_destroy:
+            self._run_script(resource, step.script, step.script.on_destroy)
         elif step.kind == "runner" and step.runner:
             runner = self.registry.instantiate(step.runner.class_name, step.runner.config)
             ctx = self._runner_ctx(resource, step, "destroy")
             runner.pre_destroy(ctx)
             runner.destroy(ctx)
             runner.post_destroy(ctx)
+        elif step.kind == "secret" and step.secret:
+            if not step.secret.if_not_exists:
+                name = step.secret.name or step.name
+                ns = step.secret.namespace or resource.namespace
+                self.kube.secret_delete(name, ns)
+        elif step.kind == "configmap" and step.configmap:
+            if not step.configmap.if_not_exists:
+                name = step.configmap.name or step.name
+                ns = step.configmap.namespace or resource.namespace
+                self.kube.configmap_delete(name, ns)
+        elif step.kind == "exec" and step.exec_spec:
+            if step.exec_spec.on_destroy is not None:
+                self._exec_step(resource, step.exec_spec, step.exec_spec.on_destroy)
+        elif step.kind == "docker-build":
+            pass  # docker images are not removed on destroy
 
     def _reload_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "reload")
@@ -820,10 +1113,116 @@ class Kflow:
                 self.kube.apply_file(m, namespace=resource.namespace)
         elif step.kind == "helm" and step.helm:
             self._helm_upgrade(step.helm)
+        elif step.kind == "kustomize" and step.kustomize:
+            self.kube.apply_kustomize(step.kustomize.path)
+        elif step.kind == "wait" and step.wait:
+            ns = step.wait.namespace or resource.namespace
+            result = self.kube.wait_for(
+                step.wait.for_resource,
+                step.wait.condition,
+                namespace=ns,
+                timeout=step.wait.timeout,
+                jsonpath=step.wait.jsonpath,
+            )
+            self._check_wait_result(result)
+        elif step.kind == "script" and step.script:
+            cmd = step.script.on_reload if step.script.on_reload is not None else step.script.run
+            self._run_script(resource, step.script, cmd)
         elif step.kind == "runner" and step.runner:
             runner = self.registry.instantiate(step.runner.class_name, step.runner.config)
             ctx = self._runner_ctx(resource, step, "reload")
             runner.reload(ctx)
+        elif step.kind == "secret" and step.secret:
+            self._apply_secret(resource, step)
+        elif step.kind == "configmap" and step.configmap:
+            self._apply_configmap(resource, step)
+        elif step.kind == "exec" and step.exec_spec:
+            spec = step.exec_spec
+            cmd = spec.on_reload if spec.on_reload is not None else spec.command
+            self._exec_step(resource, spec, cmd)
+        elif step.kind == "docker-build" and step.docker_build:
+            self._run_docker_build(resource, step.docker_build)
+
+    def _run_script(self, resource: ResourceDef, script: ScriptSpec, cmd: str) -> None:
+        if self.dry_run:
+            self.console.print(f"  [dim](dry-run) would run: {cmd!r}[/dim]")
+            return
+        workdir = script.workdir or (
+            resource.source_file.parent if resource.source_file else Path.cwd()
+        )
+        run_command(["sh", "-c", cmd], check=True, capture=not self.verbose,
+                    cwd=str(workdir))
+
+    def _apply_secret(self, resource: ResourceDef, step: StepDef) -> None:
+        spec = step.secret
+        name = spec.name or step.name
+        ns = spec.namespace or resource.namespace
+        if spec.if_not_exists and self.kube.resource_exists("secret", name, ns):
+            self.console.print(f"  [dim]secret/{name} already exists; skipping[/dim]")
+            return
+        literals = dict(spec.literals)
+        for field_name, env_var in spec.from_env.items():
+            val = os.environ.get(env_var)
+            if val is None:
+                raise KflowError(
+                    f"env var {env_var!r} required by step {step.name!r} is not set"
+                )
+            literals[field_name] = val
+        self.kube.secret_apply(
+            name, ns,
+            literals=literals,
+            from_files=spec.from_files,
+            from_env_file=spec.from_env_file,
+        )
+
+    def _apply_configmap(self, resource: ResourceDef, step: StepDef) -> None:
+        spec = step.configmap
+        name = spec.name or step.name
+        ns = spec.namespace or resource.namespace
+        if spec.if_not_exists and self.kube.resource_exists("configmap", name, ns):
+            self.console.print(f"  [dim]configmap/{name} already exists; skipping[/dim]")
+            return
+        self.kube.configmap_apply(
+            name, ns,
+            literals=spec.literals,
+            from_files=spec.from_files,
+            from_dir=spec.from_dir,
+        )
+
+    def _exec_step(self, resource: ResourceDef, spec: ExecSpec,
+                   command: List[str]) -> None:
+        result = self.kube.exec(
+            resource.namespace,
+            command=command,
+            pod=spec.pod,
+            selector=spec.selector,
+            container=spec.container,
+        )
+        if not result.skipped and result.returncode != 0:
+            raise CommandError(result.cmd, result.returncode,
+                               result.stdout, result.stderr)
+        if not result.skipped and self.verbose and result.stdout.strip():
+            self.console.print(result.stdout.rstrip())
+
+    def _run_docker_build(self, resource: ResourceDef, spec: DockerBuildSpec) -> None:
+        cmd = ["docker", "build", "-t", spec.tag, str(spec.context)]
+        if spec.file:
+            cmd += ["-f", str(spec.file)]
+        for k, v in spec.build_args.items():
+            cmd += ["--build-arg", f"{k}={v}"]
+        if spec.platform:
+            cmd += ["--platform", spec.platform]
+        if spec.target:
+            cmd += ["--target", spec.target]
+        if self.dry_run:
+            self.console.print(
+                f"  [dim](dry-run) would run: {' '.join(cmd)}[/dim]"
+            )
+            return
+        run_command(cmd, check=True, capture=not self.verbose)
+        if spec.push:
+            run_command(["docker", "push", spec.tag],
+                        check=True, capture=not self.verbose)
 
     def _helm_upgrade(self, helm: HelmSpec, *, wait: bool = False, timeout: int = 300) -> None:
         self.kube.helm_upgrade(
@@ -1427,11 +1826,19 @@ def validate(app):
     for res in engine.config.resources:
         for step in res.steps:
             for m in step.manifests:
+                if _is_url(m):
+                    continue  # can't check remote URLs at validate time
                 if not Path(m).exists():
                     missing.append(str(m))
+            if step.kind == "kustomize" and step.kustomize:
+                if not step.kustomize.path.exists():
+                    missing.append(str(step.kustomize.path))
+            if step.kind == "docker-build" and step.docker_build:
+                if not step.docker_build.context.exists():
+                    missing.append(str(step.docker_build.context))
     if missing:
         for m in missing:
-            err_console.print(f"[yellow]warning:[/yellow] manifest not found: {m}")
+            err_console.print(f"[yellow]warning:[/yellow] path not found: {m}")
     if engine.graph.warnings:
         for w in engine.graph.warnings:
             err_console.print(f"[yellow]warning:[/yellow] {w}")

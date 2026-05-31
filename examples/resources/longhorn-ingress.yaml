@@ -14,5 +14,7 @@ description: Ingress exposing the Longhorn UI through Traefik.
 dependsOn:
   - traefik
 
-manifests:
-  - manifests/longhorn-ingress.yaml
+steps:
+  - name: apply
+    manifests:
+      - manifests/longhorn-ingress.yaml

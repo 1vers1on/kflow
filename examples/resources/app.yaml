@@ -28,9 +28,17 @@ steps:
       - config             # same-resource step dependency
       - longhorn-ingress   # cross-resource dependency (resolved across phases)
 
-  - name: migrate
+  - name: wait-ready
     dependsOn:
       - deploy
+    wait:
+      for: deployment/web
+      condition: available
+      timeout: 120
+
+  - name: migrate
+    dependsOn:
+      - wait-ready
     runner:
       class: DatabaseRunner
       # `file:` is optional here because db_runner.py is registered globally

@@ -38,14 +38,15 @@ def test_step_level_order_within_resource():
     graph = DependencyGraph(load_root_config(ROOT_CONFIG))
     order = graph.node_order
     assert order.index("app.config") < order.index("app.deploy")
-    assert order.index("app.deploy") < order.index("app.migrate")
+    assert order.index("app.deploy") < order.index("app.wait-ready")
+    assert order.index("app.wait-ready") < order.index("app.migrate")
 
 
 def test_cross_resource_step_dependency():
     graph = DependencyGraph(load_root_config(ROOT_CONFIG))
     order = graph.node_order
     # app.deploy depends on longhorn-ingress
-    assert order.index("longhorn-ingress.manifests") < order.index("app.deploy")
+    assert order.index("longhorn-ingress.apply") < order.index("app.deploy")
 
 
 def test_resource_closure_for_targeting():
@@ -64,12 +65,14 @@ def test_circular_dependency_is_broken_not_raised(tmp_path):
     (base / "a.yaml").write_text(yaml.safe_dump({
         "kflow": {"version": "v1", "kind": "ResourceDefinition"},
         "name": "a", "namespace": "x", "phase": "p",
-        "manifests": ["m.yaml"], "dependsOn": ["b"],
+        "dependsOn": ["b"],
+        "steps": [{"name": "apply", "manifests": ["m.yaml"]}],
     }))
     (base / "b.yaml").write_text(yaml.safe_dump({
         "kflow": {"version": "v1", "kind": "ResourceDefinition"},
         "name": "b", "namespace": "x", "phase": "p",
-        "manifests": ["m.yaml"], "dependsOn": ["a"],
+        "dependsOn": ["a"],
+        "steps": [{"name": "apply", "manifests": ["m.yaml"]}],
     }))
     (base / "m.yaml").write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: m\n")
     (base / "kflow.yaml").write_text(yaml.safe_dump({
@@ -88,11 +91,12 @@ def test_default_phase_when_none_declared(tmp_path):
     (base / "m.yaml").write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: m\n")
     (base / "a.yaml").write_text(yaml.safe_dump({
         "kflow": {"version": "v1", "kind": "ResourceDefinition"},
-        "name": "a", "namespace": "x", "manifests": ["m.yaml"],
+        "name": "a", "namespace": "x",
+        "steps": [{"name": "apply", "manifests": ["m.yaml"]}],
     }))
     (base / "kflow.yaml").write_text(yaml.safe_dump({
         "kflow": {"version": "v1", "kind": "Config"},
         "resources": ["a.yaml"],
     }))
     graph = DependencyGraph(load_root_config(base / "kflow.yaml"))
-    assert graph.node_order == ["a.manifests"]
+    assert graph.node_order == ["a.apply"]

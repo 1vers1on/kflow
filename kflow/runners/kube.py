@@ -126,6 +126,15 @@ class KubeClient:
             args.append("--wait=false")
         return self.kubectl(args, mutating=True, check=False)
 
+    def resource_exists(self, kind: str, name: str,
+                        namespace: Optional[str] = None) -> bool:
+        """Return True if the named resource exists in the cluster."""
+        args = ["get", kind, name]
+        if namespace:
+            args += ["-n", namespace]
+        res = self.kubectl(args, check=False)
+        return res.returncode == 0 and not res.skipped
+
     # -- manifests --------------------------------------------------------
 
     def apply_file(self, path, *, namespace: Optional[str] = None) -> CommandResult:
@@ -148,6 +157,34 @@ class KubeClient:
         if ignore_not_found:
             args.append("--ignore-not-found")
         return self.kubectl(args, mutating=True, check=False)
+
+    def apply_kustomize(self, path) -> CommandResult:
+        return self.kubectl(["apply", "-k", str(path)], mutating=True)
+
+    def delete_kustomize(self, path, *, ignore_not_found: bool = True) -> CommandResult:
+        args = ["delete", "-k", str(path)]
+        if ignore_not_found:
+            args.append("--ignore-not-found")
+        return self.kubectl(args, mutating=True, check=False)
+
+    def wait_for(self, resource: str, condition: Optional[str] = None,
+                 namespace: Optional[str] = None, timeout: int = 120,
+                 jsonpath: Optional[str] = None) -> CommandResult:
+        """Wait for a resource condition or jsonpath expression.
+
+        Pass ``condition`` for ``--for=condition=X`` (e.g. ``"available"``).
+        Pass ``jsonpath`` for ``--for=jsonpath='{...}'`` (kubectl ≥ 1.23).
+        """
+        if condition:
+            for_arg = f"--for=condition={condition}"
+        elif jsonpath:
+            for_arg = f"--for=jsonpath={jsonpath}"
+        else:
+            raise ValueError("wait_for requires either condition or jsonpath")
+        args = ["wait", resource, for_arg, f"--timeout={timeout}s"]
+        if namespace:
+            args += ["-n", namespace]
+        return self.kubectl(args, check=False)
 
     # -- rollouts ---------------------------------------------------------
 
@@ -253,20 +290,74 @@ class KubeClient:
 
     def exec(self, namespace: str, *, command, selector: Optional[str] = None,
              pod: Optional[str] = None, container: Optional[str] = None) -> CommandResult:
-        """Exec a command inside a pod (first pod matching ``selector`` if given)."""
+        """Exec a command inside a pod (first running pod matching ``selector`` if given)."""
         target = pod
         if target is None and selector is not None:
             pods = self.get_pods(namespace, selector)
             running = [p for p in pods if p["phase"] == "Running"] or pods
             if not running:
-                from .shell import CommandResult as _CR
-                return _CR(cmd=["kubectl", "exec"], returncode=1,
-                           stderr=f"no pods match selector {selector!r} in {namespace}")
+                return CommandResult(cmd=["kubectl", "exec"], returncode=1,
+                                     stderr=f"no pods match selector {selector!r} in {namespace}")
             target = running[0]["name"]
+        if target is None:
+            return CommandResult(cmd=["kubectl", "exec"], returncode=1,
+                                 stderr="exec requires either pod or selector")
         args = ["exec", "-n", namespace, target]
         if container:
             args += ["-c", container]
         args += ["--", *command]
+        return self.kubectl(args, mutating=True, check=False)
+
+    # -- secrets / configmaps ---------------------------------------------
+
+    def secret_apply(self, name: str, namespace: str, *,
+                     literals: Optional[dict] = None,
+                     from_files: Optional[list] = None,
+                     from_env_file=None) -> CommandResult:
+        """Create or update a generic secret via ``--dry-run=client | apply``."""
+        args = ["create", "secret", "generic", name, "-n", namespace,
+                "--dry-run=client", "-o", "yaml"]
+        for k, v in (literals or {}).items():
+            args.append(f"--from-literal={k}={v}")
+        for f in (from_files or []):
+            args.append(f"--from-file={f}")
+        if from_env_file:
+            args.append(f"--from-env-file={from_env_file}")
+        gen = self.kubectl(args, mutating=False, check=True)
+        if gen.skipped or not gen.stdout.strip():
+            return gen
+        return self.apply_stdin(gen.stdout)
+
+    def secret_delete(self, name: str, namespace: str,
+                      *, ignore_not_found: bool = True) -> CommandResult:
+        args = ["delete", "secret", name, "-n", namespace]
+        if ignore_not_found:
+            args.append("--ignore-not-found")
+        return self.kubectl(args, mutating=True, check=False)
+
+    def configmap_apply(self, name: str, namespace: str, *,
+                        literals: Optional[dict] = None,
+                        from_files: Optional[list] = None,
+                        from_dir=None) -> CommandResult:
+        """Create or update a ConfigMap via ``--dry-run=client | apply``."""
+        args = ["create", "configmap", name, "-n", namespace,
+                "--dry-run=client", "-o", "yaml"]
+        for k, v in (literals or {}).items():
+            args.append(f"--from-literal={k}={v}")
+        for f in (from_files or []):
+            args.append(f"--from-file={f}")
+        if from_dir:
+            args.append(f"--from-file={from_dir}")
+        gen = self.kubectl(args, mutating=False, check=True)
+        if gen.skipped or not gen.stdout.strip():
+            return gen
+        return self.apply_stdin(gen.stdout)
+
+    def configmap_delete(self, name: str, namespace: str,
+                         *, ignore_not_found: bool = True) -> CommandResult:
+        args = ["delete", "configmap", name, "-n", namespace]
+        if ignore_not_found:
+            args.append("--ignore-not-found")
         return self.kubectl(args, mutating=True, check=False)
 
     # -- helm -------------------------------------------------------------

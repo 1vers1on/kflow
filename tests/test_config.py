@@ -53,11 +53,15 @@ def test_helm_and_step_parsing():
 
     app = cfg.resource_map["app"]
     step_names = [s.name for s in app.steps]
-    assert step_names == ["config", "deploy", "migrate"]
+    assert step_names == ["config", "deploy", "wait-ready", "migrate"]
     migrate = app.steps[-1]
     assert migrate.kind == "runner"
     assert migrate.runner.class_name == "DatabaseRunner"
-    assert "deploy" in migrate.depends_on
+
+    wait_step = app.steps[2]
+    assert wait_step.kind == "wait"
+    assert wait_step.wait.for_resource == "deployment/web"
+    assert wait_step.wait.condition == "available"
 
 
 def test_missing_config_raises():
