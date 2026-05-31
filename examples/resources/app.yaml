@@ -1,0 +1,40 @@
+# An application that shows off fine-grained, step-level dependencies and a
+# custom runner. Steps run in order; `deploy` additionally waits on the
+# longhorn-ingress resource (a cross-resource, cross-phase dependency), and
+# `migrate` is a runner step that waits on the deployment.
+kflow:
+  version: v1
+  kind: ResourceDefinition
+
+name: app
+namespace: demo
+phase: apps
+description: Demo web app with a config, a deployment, and a DB migration.
+
+# Targets for restart / reload / logs.
+selector: app=web
+workloads:
+  - deployment/web
+
+steps:
+  - name: config
+    manifests:
+      - manifests/app-configmap.yaml
+
+  - name: deploy
+    manifests:
+      - manifests/app-deployment.yaml
+    dependsOn:
+      - config             # same-resource step dependency
+      - longhorn-ingress   # cross-resource dependency (resolved across phases)
+
+  - name: migrate
+    dependsOn:
+      - deploy
+    runner:
+      class: DatabaseRunner
+      # `file:` is optional here because db_runner.py is registered globally
+      # in the root config. You could also point at it per-resource.
+      config:
+        database: appdb
+        seed: true

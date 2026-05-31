@@ -1,0 +1,11 @@
+# Note: no `namespace:` here. kflow applies this with `-n demo` (taken from the
+# resource definition), keeping the namespace out of the manifest itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+data:
+  APP_GREETING: "hello from kflow"
+  index.html: |
+    <!doctype html>
+    <h1>hello from kflow</h1>

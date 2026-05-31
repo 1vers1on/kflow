@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kflow"
+version = "0.1.0"
+description = "Declarative Kubernetes workflow orchestration with dependency-aware phases, state tracking, and pluggable Python runners."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "kflow authors" }]
+keywords = ["kubernetes", "helm", "orchestration", "devops", "workflow", "kubectl"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/example/kflow"
+Repository = "https://github.com/example/kflow"
+
+[project.scripts]
+kflow = "kflow.core:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

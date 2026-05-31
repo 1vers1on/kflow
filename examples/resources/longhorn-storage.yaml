@@ -1,0 +1,29 @@
+# The storage half of Longhorn. It lives in the first phase so that anything
+# needing a PVC (including traefik, if it used one) can rely on it.
+kflow:
+  version: v1
+  kind: ResourceDefinition
+
+name: longhorn-storage
+namespace: longhorn-system          # declared here, not baked into a manifest
+phase: storage
+description: Longhorn distributed block storage (storage layer only).
+
+helm:
+  release: longhorn
+  chart: longhorn/longhorn
+  version: 1.6.2
+  repo:
+    name: longhorn
+    url: https://charts.longhorn.io
+  valuesFiles:
+    - ../values/longhorn.yaml
+  values:
+    persistence:
+      defaultClass: true
+      defaultClassReplicaCount: 3
+    ingress:
+      enabled: false                # the ingress comes later, via its own resource
+
+# Used by restart/reload/logs to target the right workloads.
+selector: app.kubernetes.io/name=longhorn-manager

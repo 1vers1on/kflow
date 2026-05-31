@@ -1,0 +1,44 @@
+# Root kflow configuration.
+#
+# The top-level `kflow:` block is what marks this file as a kflow file (rather
+# than a raw Kubernetes manifest). `kind: Config` makes it the root config.
+#
+# kflow does NOT auto-discover anything. It starts here and follows the paths
+# under `resources:` (and `runners:`).
+kflow:
+  version: v1
+  kind: Config
+
+# Where kflow keeps its own local state. State is namespaced per kube-context.
+state:
+  dir: ~/.kflow
+
+# Optional: pin a kubeconfig context. Omit to use the active context.
+# context: my-cluster
+
+# Custom runner files registered globally. Each file may define one or more
+# BaseRunner subclasses; they become available to any resource by class name.
+runners:
+  - runners/db_runner.py
+
+# Phases are a strict, ordered sequence. Every step in phase N runs before any
+# step in phase N+1. This is how longhorn<->traefik circularity is resolved:
+# longhorn's storage layer comes up first, then traefik, then the longhorn
+# ingress object which needs traefik to exist.
+phases:
+  - name: storage
+    description: persistent storage layer
+  - name: ingress-controller
+    description: traefik ingress controller
+  - name: ingress
+    description: ingress objects that require the controller to be up
+  - name: apps
+    description: application workloads
+
+# Resource definition files (or directories of them). Followed in declared
+# order; ordering across phases/dependencies is computed, not positional.
+resources:
+  - resources/longhorn-storage.yaml
+  - resources/traefik.yaml
+  - resources/longhorn-ingress.yaml
+  - resources/app.yaml

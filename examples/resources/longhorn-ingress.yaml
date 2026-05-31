@@ -1,0 +1,18 @@
+# The ingress half of Longhorn. This is the resource that creates the
+# longhorn<->traefik "cycle" in naive tooling: it belongs to longhorn but
+# depends on traefik. kflow handles it by putting it in a later phase that
+# explicitly depends on traefik.
+kflow:
+  version: v1
+  kind: ResourceDefinition
+
+name: longhorn-ingress
+namespace: longhorn-system
+phase: ingress
+description: Ingress exposing the Longhorn UI through Traefik.
+
+dependsOn:
+  - traefik
+
+manifests:
+  - manifests/longhorn-ingress.yaml

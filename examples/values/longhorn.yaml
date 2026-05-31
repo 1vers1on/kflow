@@ -1,0 +1,8 @@
+# Example Longhorn values. kflow does not track changes to this file; it simply
+# passes it to `helm upgrade --install`.
+defaultSettings:
+  defaultDataPath: /var/lib/longhorn
+  replicaSoftAntiAffinity: true
+csi:
+  attacherReplicaCount: 2
+  provisionerReplicaCount: 2

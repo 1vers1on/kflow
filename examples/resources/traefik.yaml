@@ -1,0 +1,25 @@
+# Traefik ingress controller. Second phase: it must be up before any Ingress
+# objects (like longhorn's) are created.
+kflow:
+  version: v1
+  kind: ResourceDefinition
+
+name: traefik
+namespace: traefik
+phase: ingress-controller
+description: Traefik ingress controller.
+
+# Backward, cross-phase dependency: already satisfied by phase order, but
+# declaring it documents intent and makes targeted applies pull it in.
+dependsOn:
+  - longhorn-storage
+
+helm:
+  release: traefik
+  chart: traefik/traefik
+  version: 28.0.0
+  repo:
+    name: traefik
+    url: https://traefik.github.io/charts
+  valuesFiles:
+    - ../values/traefik.yaml
