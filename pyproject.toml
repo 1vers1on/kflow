@@ -3,13 +3,13 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kflow"
+name = "kflow-py"
 version = "0.1.0"
 description = "Declarative Kubernetes workflow orchestration with dependency-aware phases, state tracking, and pluggable Python runners."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "kflow authors" }]
+authors = [{ name = "1vers1on" }]
 keywords = ["kubernetes", "helm", "orchestration", "devops", "workflow", "kubectl"]
 classifiers = [
     "Development Status :: 4 - Beta",
