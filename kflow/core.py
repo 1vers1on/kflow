@@ -835,6 +835,21 @@ class Kflow:
 
     # -- workload targeting ----------------------------------------------
 
+    def _resolve_selector(self, resource: ResourceDef) -> Optional[str]:
+        """The label selector used to locate a resource's live workloads.
+
+        An explicit ``selector:`` wins; otherwise a helm-backed resource falls
+        back to the release's ``app.kubernetes.io/instance`` label. A resource
+        with neither has no inferable selector and returns ``None`` - kflow must
+        not guess by scanning the whole namespace, because that namespace may
+        hold unrelated workloads owned by other resources.
+        """
+        if resource.selector:
+            return resource.selector
+        if resource.helm:
+            return f"app.kubernetes.io/instance={resource.helm.release}"
+        return None
+
     def _target_workloads(self, resource: ResourceDef) -> List[tuple]:
         """Return (kind, name) workloads to restart for a resource."""
         if resource.workloads:
@@ -849,12 +864,12 @@ class Kflow:
                     continue
                 out.append((kind, name))
             return out
-        selector = resource.selector
-        if not selector and resource.helm:
-            selector = f"app.kubernetes.io/instance={resource.helm.release}"
-        live = self.kube.get_workloads(resource.namespace, selector)
-        if not selector and not live:
+        selector = self._resolve_selector(resource)
+        if not selector:
+            # No explicit targets and nothing to derive a selector from: target
+            # nothing rather than every workload in the namespace.
             return []
+        live = self.kube.get_workloads(resource.namespace, selector)
         return [(w["kind"], w["name"]) for w in live]
 
     def _restart_workloads(self, resource: ResourceDef, *, wait: bool, timeout: int) -> int:
@@ -876,6 +891,8 @@ class Kflow:
         return len(workloads)
 
     def _wait_resource(self, resource: ResourceDef, timeout: int) -> None:
+        if self.dry_run:
+            return
         for kind, name in self._target_workloads(resource):
             self.console.print(
                 f"  [dim]…waiting for {kind.lower()}/{name}[/dim]"
@@ -994,8 +1011,9 @@ class Kflow:
         for rname in targets:
             resource = self.config.resource_map[rname]
             entry = self.state.get(rname) or {}
-            live = self.kube.get_workloads(resource.namespace, resource.selector) \
-                if not self.dry_run else []
+            selector = self._resolve_selector(resource)
+            live = self.kube.get_workloads(resource.namespace, selector) \
+                if selector and not self.dry_run else []
             ready = sum(1 for w in live if w["ok"])
             helm_state = ""
             if resource.helm and not self.dry_run:
@@ -1009,7 +1027,7 @@ class Kflow:
                 "state": entry.get("status", "unknown"),
                 "last": entry.get("last_applied", "-"),
                 "helm": helm_state or ("-" if resource.helm else ""),
-                "workloads": f"{ready}/{len(live)}" if live else ("-" if not resource.selector else "0/0"),
+                "workloads": f"{ready}/{len(live)}" if live else ("0/0" if selector else "-"),
                 "drift": len(drift),
             })
         return rows
@@ -1019,11 +1037,9 @@ class Kflow:
         results = []
         for rname in targets:
             resource = self.config.resource_map[rname]
-            selector = resource.selector
-            if not selector and resource.helm:
-                selector = f"app.kubernetes.io/instance={resource.helm.release}"
+            selector = self._resolve_selector(resource)
             live = self.kube.get_workloads(resource.namespace, selector) \
-                if not self.dry_run else []
+                if selector and not self.dry_run else []
             healthy = all(w["ok"] for w in live) if live else None
             detail = ", ".join(
                 f"{w['kind'].lower()}/{w['name']} {w['ready']}/{w['desired']}"

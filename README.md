@@ -13,7 +13,7 @@ kubeconfig context, so there's no new cluster access model to learn.
 pip install kflow
 
 kflow -c examples/kflow.yaml graph        # see the plan
-kflow -c examples/kflow.yaml apply --dry-run
+kflow -c examples/kflow.yaml --dry-run apply
 kflow -c examples/kflow.yaml apply        # bring everything up, in order
 ```
 
@@ -238,6 +238,10 @@ calls are automatically skipped under `--dry-run`.
 
 Register runners globally (`runners:` in the root config) or per resource
 (`file:` in a runner block / step). They're imported dynamically at runtime.
+
+**See [docs/writing-runners.md](docs/writing-runners.md) for the full guide** -
+every hook, the `RunnerContext` and `KubeClient` API, the dry-run rules, helpers,
+and testing patterns.
 
 ---
 

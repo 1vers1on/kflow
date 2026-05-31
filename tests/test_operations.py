@@ -94,6 +94,34 @@ def test_restart_targets_workloads(recorder, state_dir):
     assert any("rollout restart deployment/web" in c for c in cmds)
 
 
+def test_restart_does_not_touch_unrelated_namespace_workloads(recorder, state_dir,
+                                                               monkeypatch):
+    """A resource with no workloads/selector/helm must not adopt the other
+    workloads sharing its namespace - restarting longhorn-ingress must never
+    restart longhorn's own pods (a destructive, wrong-target action)."""
+    engine = _build(state_dir)
+    # Pretend the shared namespace is full of another resource's workloads.
+    monkeypatch.setattr(
+        engine.kube, "get_workloads",
+        lambda ns, sel=None: [{"kind": "Deployment", "name": "longhorn-manager",
+                               "ready": 1, "desired": 1, "ok": True}],
+    )
+    ingress = engine.config.resource_map["longhorn-ingress"]
+    assert engine._resolve_selector(ingress) is None
+    assert engine._target_workloads(ingress) == []
+
+    engine.restart(["longhorn-ingress"], wait=False)
+    assert not any("rollout restart" in c for c in _cmds(recorder))
+
+
+def test_helm_resource_targets_release_instance(recorder, state_dir):
+    """A helm resource with no explicit selector targets its release's pods
+    via the app.kubernetes.io/instance label, not the whole namespace."""
+    engine = _build(state_dir)
+    traefik = engine.config.resource_map["traefik"]
+    assert engine._resolve_selector(traefik) == "app.kubernetes.io/instance=traefik"
+
+
 def test_reload_applies_then_restarts(recorder, state_dir):
     engine = _build(state_dir)
     engine.reload(["app"], wait=False)
