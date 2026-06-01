@@ -289,7 +289,7 @@ external API).
 
 ```python
 from kflow.runners.helpers import (
-    b64, configmap_manifest, secret_manifest, wait_for,
+    b64, configmap_manifest, secret_manifest, wait_for, generate_secret,
 )
 
 cm = configmap_manifest("app-config", ctx.namespace, {"LOG_LEVEL": "debug"})
@@ -308,6 +308,50 @@ ok = wait_for(
 `secret_manifest(..., string_data=False)` base64-encodes into `data` instead of
 `stringData`. `b64(value)` encodes a single string. Both manifest helpers add an
 `app.kubernetes.io/managed-by: kflow` label (merge your own via `labels=`).
+
+### Generating secrets
+
+`generate_secret` draws from the OS cryptographic RNG (`secrets.choice`) so it
+is safe for passwords, tokens, API keys, and other credentials:
+
+```python
+from kflow.runners.helpers import generate_secret
+import string
+
+# 32-character alphanumeric (default)
+password = generate_secret()
+
+# 48-character hex string
+hex_token = generate_secret(48, alphabet=string.hexdigits[:16])
+
+# Use inline when building a Secret manifest
+sec = secret_manifest("db-creds", ctx.namespace, {
+    "PASSWORD": generate_secret(32),
+    "SESSION_KEY": generate_secret(64),
+})
+ctx.apply_manifest(sec)
+```
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `length` | `32` | Number of characters in the result. |
+| `alphabet` | letters + digits | Character set to draw from. No shell-special or ambiguous characters by default. |
+
+> **Idempotency note:** `generate_secret` produces a different value every call.
+> If your `apply` hook runs on every `kflow apply`, wrap the call in a check so
+> you only generate a new secret when one does not already exist:
+>
+> ```python
+> def apply(self, ctx):
+>     res = ctx.kubectl(["get", "secret", "db-creds",
+>                        "-n", ctx.namespace], check=False)
+>     if res.ok:
+>         ctx.log("secret already exists, skipping")
+>         return
+>     sec = secret_manifest("db-creds", ctx.namespace,
+>                           {"PASSWORD": generate_secret()})
+>     ctx.apply_manifest(sec)
+> ```
 
 > `wait_for` sleeps in real time; it does **not** short-circuit under
 > `--dry-run`. Guard it with `if not ctx.dry_run:` if a dry-run shouldn't block.
@@ -425,7 +469,7 @@ Imported from `kflow.runners`:
 | `CommandError` | exception | Raised on a failed checked command. |
 | `run_command` | function | Low-level subprocess runner. |
 | `format_command` | function | Render a command list as a shell string. |
-| `helpers` | module | `b64`, `configmap_manifest`, `secret_manifest`, `wait_for`. |
+| `helpers` | module | `b64`, `configmap_manifest`, `secret_manifest`, `wait_for`, `generate_secret`. |
 
 `BaseRunner` hooks: `pre_apply`, `apply`, `post_apply`, `pre_destroy`,
 `destroy`, `post_destroy`, `restart`, `reload`, `health`, `status`.

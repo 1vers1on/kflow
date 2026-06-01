@@ -2,16 +2,45 @@
 
 These are optional sugar - a runner can do everything through
 ``ctx.kube``/``ctx.kubectl`` - but they cover the most common project-specific
-chores (rendering ConfigMaps/Secrets, base64, simple polling).
+chores (rendering ConfigMaps/Secrets, base64, simple polling, secret generation).
 """
 
 from __future__ import annotations
 
 import base64
+import secrets
+import string
 import time
 from typing import Callable, Mapping, Optional
 
+_DEFAULT_ALPHABET = string.ascii_letters + string.digits
+
 import yaml
+
+
+def generate_secret(length: int = 32, *, alphabet: Optional[str] = None) -> str:
+    """Generate a cryptographically secure random secret string.
+
+    Uses :func:`secrets.choice` over *alphabet* so every character is drawn
+    from the OS CSPRNG. The default alphabet is ASCII letters and digits
+    (no ambiguous or shell-special characters), which is safe to embed
+    directly in YAML ``stringData`` values.
+
+    Args:
+        length: Number of characters to generate (default 32).
+        alphabet: Character set to draw from. Defaults to
+            ``string.ascii_letters + string.digits``.
+
+    Example::
+
+        sec = secret_manifest("db-creds", ctx.namespace, {
+            "PASSWORD": generate_secret(32),
+            "API_KEY":  generate_secret(48, alphabet=string.hexdigits[:16]),
+        })
+        ctx.apply_manifest(sec)
+    """
+    chars = alphabet if alphabet is not None else _DEFAULT_ALPHABET
+    return "".join(secrets.choice(chars) for _ in range(length))
 
 
 def b64(value: str) -> str:
