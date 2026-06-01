@@ -202,6 +202,38 @@ class KubeClient:
             check=False,
         )
 
+    def rollout_wait_all(self, namespace: str, *,
+                         kinds: Optional[Sequence[str]] = None,
+                         selector: Optional[str] = None,
+                         timeout: int = 300) -> None:
+        """Wait for every rollout of the given kinds in ``namespace`` to complete.
+
+        Mirrors the bash wait_for_rollouts helper: list resources of each kind,
+        then run ``kubectl rollout status`` on each one. Raises ``CommandError``
+        on the first failure.
+        """
+        from .shell import CommandError  # local import to avoid circular at module level
+        if kinds is None:
+            kinds = ["deployment", "statefulset", "daemonset"]
+        for kind in kinds:
+            args = ["get", kind, "-o", "name", "-n", namespace]
+            if selector:
+                args += ["-l", selector]
+            result = self.kubectl(args, check=False)
+            if result.returncode != 0 or not result.stdout.strip():
+                continue
+            for resource in result.stdout.strip().splitlines():
+                resource = resource.strip()
+                if not resource:
+                    continue
+                r = self.kubectl(
+                    ["rollout", "status", resource, "-n", namespace,
+                     f"--timeout={timeout}s"],
+                    check=False,
+                )
+                if not r.skipped and r.returncode != 0:
+                    raise CommandError(r.cmd, r.returncode, r.stdout, r.stderr)
+
     # -- queries ----------------------------------------------------------
 
     def get_json(self, args) -> dict:

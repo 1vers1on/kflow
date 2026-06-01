@@ -111,6 +111,20 @@ class WaitSpec:
 
 
 @dataclass
+class RolloutWaitSpec:
+    """Wait for all rollouts of specific workload kinds to complete.
+
+    Equivalent to running ``kubectl rollout status`` on every deployment,
+    statefulset, and daemonset in the namespace (optionally filtered by
+    selector).
+    """
+    kinds: List[str] = field(default_factory=lambda: ["deployment", "statefulset", "daemonset"])
+    namespace: Optional[str] = None
+    selector: Optional[str] = None
+    timeout: int = 300
+
+
+@dataclass
 class ScriptSpec:
     run: str
     on_destroy: Optional[str] = None  # None = skip on destroy
@@ -169,13 +183,14 @@ class DockerBuildSpec:
 @dataclass
 class StepDef:
     name: str
-    kind: str  # manifest | helm | kustomize | wait | script | runner |
+    kind: str  # manifest | helm | kustomize | wait | rollout-wait | script | runner |
                # secret | configmap | exec | docker-build
     depends_on: List[str] = field(default_factory=list)
     manifests: List[Union[Path, str]] = field(default_factory=list)  # Path or URL
     helm: Optional[HelmSpec] = None
     kustomize: Optional[KustomizeSpec] = None
     wait: Optional[WaitSpec] = None
+    rollout_wait: Optional[RolloutWaitSpec] = None
     script: Optional[ScriptSpec] = None
     runner: Optional[RunnerSpec] = None
     secret: Optional[SecretSpec] = None
@@ -361,6 +376,17 @@ def _parse_wait(spec: dict, resource_name: str) -> WaitSpec:
     )
 
 
+def _parse_rollout_wait(spec: dict, resource_name: str) -> RolloutWaitSpec:
+    raw_kinds = spec.get("kinds")
+    kinds = list(raw_kinds) if raw_kinds else ["deployment", "statefulset", "daemonset"]
+    return RolloutWaitSpec(
+        kinds=kinds,
+        namespace=spec.get("namespace"),
+        selector=spec.get("selector"),
+        timeout=int(spec.get("timeout", 300)),
+    )
+
+
 def _parse_script(spec: dict, base: Path, resource_name: str) -> ScriptSpec:
     if "run" not in spec:
         raise ConfigError(f"script block for {resource_name!r} is missing 'run'")
@@ -492,6 +518,10 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     if spec.get("wait"):
         return StepDef(name=name, kind="wait", depends_on=depends_on,
                        wait=_parse_wait(spec["wait"], resource_name))
+    if spec.get("rolloutWait") is not None:
+        raw = spec["rolloutWait"] if isinstance(spec["rolloutWait"], dict) else {}
+        return StepDef(name=name, kind="rollout-wait", depends_on=depends_on,
+                       rollout_wait=_parse_rollout_wait(raw, resource_name))
     if spec.get("script"):
         return StepDef(name=name, kind="script", depends_on=depends_on,
                        script=_parse_script(spec["script"], base, resource_name))
@@ -512,7 +542,7 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
                        docker_build=_parse_docker_build(spec["dockerBuild"], base, resource_name))
     raise ConfigError(
         f"step {name!r} in {resource_name!r} must define one of: "
-        "manifests, helm, kustomize, wait, script, runner, "
+        "manifests, helm, kustomize, wait, rolloutWait, script, runner, "
         "secret, configmap, exec, dockerBuild"
     )
 
@@ -901,6 +931,8 @@ class StateManager:
                 steps[step.name] = {"kind": "kustomize", "path": str(step.kustomize.path)}
             elif step.kind == "wait":
                 steps[step.name] = {"kind": "wait"}
+            elif step.kind == "rollout-wait":
+                steps[step.name] = {"kind": "rollout-wait"}
             elif step.kind == "script":
                 steps[step.name] = {"kind": "script"}
             elif step.kind == "runner" and step.runner:
@@ -1058,6 +1090,11 @@ class Kflow:
                 jsonpath=step.wait.jsonpath,
             )
             self._check_wait_result(result)
+        elif step.kind == "rollout-wait" and step.rollout_wait:
+            spec = step.rollout_wait
+            ns = spec.namespace or resource.namespace
+            self.kube.rollout_wait_all(ns, kinds=spec.kinds, selector=spec.selector,
+                                       timeout=spec.timeout)
         elif step.kind == "script" and step.script:
             self._run_script(resource, step.script, step.script.run)
         elif step.kind == "runner" and step.runner:
@@ -1086,6 +1123,8 @@ class Kflow:
             self.kube.delete_kustomize(step.kustomize.path)
         elif step.kind == "wait":
             pass  # nothing to undo for a wait step
+        elif step.kind == "rollout-wait":
+            pass  # nothing to undo for a rollout-wait step
         elif step.kind == "script" and step.script and step.script.on_destroy:
             self._run_script(resource, step.script, step.script.on_destroy)
         elif step.kind == "runner" and step.runner:
@@ -1129,6 +1168,11 @@ class Kflow:
                 jsonpath=step.wait.jsonpath,
             )
             self._check_wait_result(result)
+        elif step.kind == "rollout-wait" and step.rollout_wait:
+            spec = step.rollout_wait
+            ns = spec.namespace or resource.namespace
+            self.kube.rollout_wait_all(ns, kinds=spec.kinds, selector=spec.selector,
+                                       timeout=spec.timeout)
         elif step.kind == "script" and step.script:
             cmd = step.script.on_reload if step.script.on_reload is not None else step.script.run
             self._run_script(resource, step.script, cmd)

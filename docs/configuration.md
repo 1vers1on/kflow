@@ -334,6 +334,38 @@ Exactly one of `condition` or `jsonpath` is required. On **destroy** and **resta
 
 ---
 
+### `rolloutWait`
+
+Wait for every rollout of the given workload kinds in a namespace to complete. Runs `kubectl rollout status` on each matching resource, in the same style as the classic `wait_for_rollouts` bash helper.
+
+```yaml
+- name: wait-all-rollouts
+  rolloutWait: {}              # use all defaults
+```
+
+```yaml
+- name: wait-app-rollouts
+  dependsOn: [deploy]
+  rolloutWait:
+    kinds: [deployment, statefulset]
+    selector: app=myapp          # optional; filter by label selector
+    namespace: my-ns             # optional; defaults to resource namespace
+    timeout: 120
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `kinds` | no | List of workload kinds to enumerate. Default: `[deployment, statefulset, daemonset]`. |
+| `selector` | no | Label selector to filter which workloads are waited on (passed as `-l`). Omit to wait on all workloads of the given kinds in the namespace. |
+| `namespace` | no | Namespace to list workloads from. Defaults to the resource namespace. |
+| `timeout` | no | Per-rollout timeout in seconds. Default: `300`. |
+
+Unlike `wait`, which targets a single named resource, `rolloutWait` **discovers** all workloads of the requested kinds in the namespace and waits on each in turn. If no resources of a given kind are found it is silently skipped. On **destroy**, rollout-wait steps are no-ops.
+
+`rolloutWait: {}` (an empty mapping) is valid and uses all defaults.
+
+---
+
 ### `script`
 
 Run a shell command at apply time.
