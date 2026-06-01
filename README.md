@@ -1,6 +1,6 @@
 # kflow
 
-![ci](https://github.com/1vers1on/kflow/actions/workflows/ci.yml/badge.svg)
+![ci](https://github.com/1vers1on/kflow/actions/workflows/ci.yml/badge.svg) [![pypi](https://img.shields.io/pypi/v/kflow-py.svg)](https://pypi.org/project/kflow-py/)
 
 Declarative Kubernetes workflow orchestration. kflow replaces the pile of
 one-off `apply.sh` / `destroy.sh` / `restart.sh` / `reload.sh` scripts with a
