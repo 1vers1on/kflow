@@ -400,6 +400,8 @@ Declaratively create or update a Kubernetes `Secret` of type `Opaque`.
       - certs/tls.crt
       - tls.key=certs/tls.key          # key=path form
     fromEnvFile: secrets.env
+    fromCommand:
+      TOKEN: "openssl rand -base64 128"   # key: shell command; stdout becomes the value
     ifNotExists: false           # skip if the secret already exists
 ```
 
@@ -411,9 +413,12 @@ Declaratively create or update a Kubernetes `Secret` of type `Opaque`.
 | `fromEnv` | no | Dict of `key: ENV_VAR_NAME` - reads values from the environment at apply time. Missing variables raise an error. |
 | `fromFiles` | no | List of file paths (`--from-file`). Use `key=path` to control the key name. Paths are relative to the resource file. |
 | `fromEnvFile` | no | Path to a `.env`-style file (`--from-env-file`). Relative to the resource file. |
+| `fromCommand` | no | Dict of `key: shell command`. Each command is run via `sh -c`; its trimmed stdout becomes the value. Non-zero exit raises an error. |
 | `ifNotExists` | no | When `true`, skip creating/updating the secret if it already exists in the cluster. Default: `false`. |
 
 Implemented as `kubectl create secret generic --dry-run=client -o yaml | kubectl apply -f -` so it is idempotent and update-safe. On **destroy**, the secret is deleted unless `ifNotExists: true`.
+
+`fromCommand` is evaluated at apply time on the machine running kflow. Combine it with `ifNotExists: true` when you want a secret generated once and never rotated automatically.
 
 ---
 
@@ -433,6 +438,8 @@ Declaratively create or update a Kubernetes `ConfigMap`.
       - config/app.properties
       - app.json=config/app.json   # key=path form
     fromDir: config/             # load an entire directory as --from-file
+    fromCommand:
+      GIT_SHA: "git rev-parse --short HEAD"   # key: shell command; stdout becomes the value
     ifNotExists: false
 ```
 
@@ -443,6 +450,7 @@ Declaratively create or update a Kubernetes `ConfigMap`.
 | `literals` | no | Dict of `key: value` pairs (`--from-literal`). |
 | `fromFiles` | no | List of file paths (`--from-file`). Use `key=path` to control the key name. Paths are relative to the resource file. |
 | `fromDir` | no | Path to a directory; all files inside are added as keys (`--from-file=<dir>`). Relative to the resource file. |
+| `fromCommand` | no | Dict of `key: shell command`. Each command is run via `sh -c`; its trimmed stdout becomes the value. Non-zero exit raises an error. |
 | `ifNotExists` | no | When `true`, skip if the ConfigMap already exists. Default: `false`. |
 
 ---

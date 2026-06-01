@@ -127,6 +127,7 @@ class SecretSpec:
     from_env: dict = field(default_factory=dict)         # key: ENV_VAR_NAME
     from_files: List[str] = field(default_factory=list)  # "path" or "key=path"
     from_env_file: Optional[Path] = None
+    from_command: dict = field(default_factory=dict)     # key: shell command
     if_not_exists: bool = False  # skip if the secret already exists in the cluster
 
 
@@ -138,6 +139,7 @@ class ConfigMapSpec:
     literals: dict = field(default_factory=dict)
     from_files: List[str] = field(default_factory=list)  # "path" or "key=path"
     from_dir: Optional[Path] = None    # pass a whole directory to --from-file
+    from_command: dict = field(default_factory=dict)     # key: shell command
     if_not_exists: bool = False
 
 
@@ -399,6 +401,7 @@ def _parse_secret(spec: dict, base: Path, resource_name: str, step_name: str) ->
         from_env=dict(spec.get("fromEnv") or {}),
         from_files=from_files,
         from_env_file=_resolve(base, env_file_raw) if env_file_raw else None,
+        from_command=dict(spec.get("fromCommand") or {}),
         if_not_exists=bool(spec.get("ifNotExists", False)),
     )
 
@@ -419,6 +422,7 @@ def _parse_configmap(spec: dict, base: Path, resource_name: str, step_name: str)
         literals=dict(spec.get("literals") or {}),
         from_files=from_files,
         from_dir=_resolve(base, from_dir_raw) if from_dir_raw else None,
+        from_command=dict(spec.get("fromCommand") or {}),
         if_not_exists=bool(spec.get("ifNotExists", False)),
     )
 
@@ -1153,6 +1157,25 @@ class Kflow:
         run_command(["sh", "-c", cmd], check=True, capture=not self.verbose,
                     cwd=str(workdir))
 
+    def _run_command_literals(self, commands: dict, step_name: str) -> dict:
+        """Run each shell command and return a dict of key → stripped stdout."""
+        out = {}
+        for key, cmd in commands.items():
+            if self.dry_run:
+                self.console.print(
+                    f"  [dim](dry-run) would run for {key!r}: {cmd!r}[/dim]"
+                )
+                out[key] = ""
+                continue
+            result = run_command(["sh", "-c", cmd], check=False, capture=True)
+            if result.returncode != 0:
+                raise KflowError(
+                    f"fromCommand for key {key!r} in step {step_name!r} failed "
+                    f"(exit {result.returncode}): {(result.stderr or result.stdout).strip()}"
+                )
+            out[key] = result.stdout.strip()
+        return out
+
     def _apply_secret(self, resource: ResourceDef, step: StepDef) -> None:
         spec = step.secret
         name = spec.name or step.name
@@ -1168,6 +1191,7 @@ class Kflow:
                     f"env var {env_var!r} required by step {step.name!r} is not set"
                 )
             literals[field_name] = val
+        literals.update(self._run_command_literals(spec.from_command, step.name))
         self.kube.secret_apply(
             name, ns,
             literals=literals,
@@ -1182,9 +1206,11 @@ class Kflow:
         if spec.if_not_exists and self.kube.resource_exists("configmap", name, ns):
             self.console.print(f"  [dim]configmap/{name} already exists; skipping[/dim]")
             return
+        literals = dict(spec.literals)
+        literals.update(self._run_command_literals(spec.from_command, step.name))
         self.kube.configmap_apply(
             name, ns,
-            literals=spec.literals,
+            literals=literals,
             from_files=spec.from_files,
             from_dir=spec.from_dir,
         )
