@@ -47,7 +47,7 @@ from .runners import KubeClient, RunnerContext, RunnerRegistry
 from .runners.registry import RunnerLoadError
 from .runners.shell import CommandError, run_command
 
-__version__ = "0.1.0"
+__version__ = "1.0.3"
 
 # Top-level identifier block key. Its presence marks a file as a kflow file.
 KFLOW_KEY = "kflow"
@@ -197,6 +197,8 @@ class StepDef:
     configmap: Optional[ConfigMapSpec] = None
     exec_spec: Optional[ExecSpec] = None
     docker_build: Optional[DockerBuildSpec] = None
+    namespace: Optional[str] = None   # override resource namespace for this step
+    no_namespace: bool = False         # skip -n flag (cluster-scoped resources)
 
 
 @dataclass
@@ -211,6 +213,7 @@ class ResourceDef:
     keep_namespace: bool = False
     source_file: Optional[Path] = None
     description: str = ""
+    auto_create_namespace: Optional[bool] = None  # None = inherit from root config
     # populated during graph build:
     phase_name: str = DEFAULT_PHASE
     phase_index: int = 0
@@ -241,6 +244,7 @@ class RootConfig:
     phases: List[PhaseDef]
     runner_files: List[Path]
     resources: List[ResourceDef]
+    auto_create_namespace: bool = False  # when True, create missing namespaces on apply/reload
 
     @property
     def resource_map(self) -> Dict[str, ResourceDef]:
@@ -506,40 +510,44 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     if not name:
         raise ConfigError(f"a step in {resource_name!r} is missing 'name'")
     depends_on = list(spec.get("dependsOn") or [])
+    ns_raw = spec.get("namespace")
+    ns_override = str(ns_raw) if isinstance(ns_raw, str) and ns_raw else None
+    no_ns = bool(spec.get("noNamespace", False))
+    common = {"namespace": ns_override, "no_namespace": no_ns}
     if spec.get("manifests"):
         return StepDef(name=name, kind="manifest", depends_on=depends_on,
-                       manifests=_parse_manifests(spec["manifests"], base))
+                       manifests=_parse_manifests(spec["manifests"], base), **common)
     if spec.get("helm"):
         return StepDef(name=name, kind="helm", depends_on=depends_on,
-                       helm=_parse_helm(spec["helm"], default_ns, base, resource_name))
+                       helm=_parse_helm(spec["helm"], default_ns, base, resource_name), **common)
     if spec.get("kustomize"):
         return StepDef(name=name, kind="kustomize", depends_on=depends_on,
-                       kustomize=_parse_kustomize(spec["kustomize"], base, resource_name))
+                       kustomize=_parse_kustomize(spec["kustomize"], base, resource_name), **common)
     if spec.get("wait"):
         return StepDef(name=name, kind="wait", depends_on=depends_on,
-                       wait=_parse_wait(spec["wait"], resource_name))
+                       wait=_parse_wait(spec["wait"], resource_name), **common)
     if spec.get("rolloutWait") is not None:
         raw = spec["rolloutWait"] if isinstance(spec["rolloutWait"], dict) else {}
         return StepDef(name=name, kind="rollout-wait", depends_on=depends_on,
-                       rollout_wait=_parse_rollout_wait(raw, resource_name))
+                       rollout_wait=_parse_rollout_wait(raw, resource_name), **common)
     if spec.get("script"):
         return StepDef(name=name, kind="script", depends_on=depends_on,
-                       script=_parse_script(spec["script"], base, resource_name))
+                       script=_parse_script(spec["script"], base, resource_name), **common)
     if spec.get("runner"):
         return StepDef(name=name, kind="runner", depends_on=depends_on,
-                       runner=_parse_runner(spec["runner"], base, resource_name))
+                       runner=_parse_runner(spec["runner"], base, resource_name), **common)
     if spec.get("secret"):
         return StepDef(name=name, kind="secret", depends_on=depends_on,
-                       secret=_parse_secret(spec["secret"], base, resource_name, name))
+                       secret=_parse_secret(spec["secret"], base, resource_name, name), **common)
     if spec.get("configmap"):
         return StepDef(name=name, kind="configmap", depends_on=depends_on,
-                       configmap=_parse_configmap(spec["configmap"], base, resource_name, name))
+                       configmap=_parse_configmap(spec["configmap"], base, resource_name, name), **common)
     if spec.get("exec"):
         return StepDef(name=name, kind="exec", depends_on=depends_on,
-                       exec_spec=_parse_exec(spec["exec"], resource_name))
+                       exec_spec=_parse_exec(spec["exec"], resource_name), **common)
     if spec.get("dockerBuild"):
         return StepDef(name=name, kind="docker-build", depends_on=depends_on,
-                       docker_build=_parse_docker_build(spec["dockerBuild"], base, resource_name))
+                       docker_build=_parse_docker_build(spec["dockerBuild"], base, resource_name), **common)
     raise ConfigError(
         f"step {name!r} in {resource_name!r} must define one of: "
         "manifests, helm, kustomize, wait, rolloutWait, script, runner, "
@@ -563,6 +571,8 @@ def _build_resource(doc: dict, source: Path) -> ResourceDef:
         dupes = sorted({n for n in step_names if step_names.count(n) > 1})
         raise ConfigError(f"resource {name!r} has duplicate step names: {dupes}")
 
+    acn_raw = doc.get("autoCreateNamespace")
+    auto_create_ns = None if acn_raw is None else bool(acn_raw)
     return ResourceDef(
         name=name,
         namespace=namespace,
@@ -574,6 +584,7 @@ def _build_resource(doc: dict, source: Path) -> ResourceDef:
         keep_namespace=bool(doc.get("keepNamespace", False)),
         source_file=source,
         description=doc.get("description", ""),
+        auto_create_namespace=auto_create_ns,
     )
 
 
@@ -648,6 +659,7 @@ def load_root_config(config_path) -> RootConfig:
         phases=phases,
         runner_files=runner_files,
         resources=resources,
+        auto_create_namespace=bool(doc.get("autoCreateNamespace", False)),
     )
 
 
@@ -1013,6 +1025,26 @@ class Kflow:
     def load(cls, config_path, **kwargs) -> "Kflow":
         return cls(load_root_config(config_path), **kwargs)
 
+    # -- namespace helpers ------------------------------------------------
+
+    def _eff_ns(self, resource: ResourceDef, step: StepDef) -> Optional[str]:
+        """Effective namespace for a step.
+
+        Priority: step.no_namespace > step.namespace > resource.namespace.
+        Returns None when the step is cluster-scoped (no_namespace=True).
+        """
+        if step.no_namespace:
+            return None
+        if step.namespace is not None:
+            return step.namespace
+        return resource.namespace
+
+    def _should_create_ns(self, resource: ResourceDef) -> bool:
+        """Whether to auto-create missing namespaces for this resource."""
+        if resource.auto_create_namespace is not None:
+            return resource.auto_create_namespace
+        return self.config.auto_create_namespace
+
     # -- runner wiring ----------------------------------------------------
 
     def _load_runners(self) -> None:
@@ -1029,7 +1061,7 @@ class Kflow:
                     operation: str) -> RunnerContext:
         return RunnerContext(
             resource=resource.name,
-            namespace=resource.namespace,
+            namespace=self._eff_ns(resource, step) or resource.namespace,
             config=step.runner.config if step.runner else {},
             kube=self.kube,
             console=self.console,
@@ -1073,27 +1105,28 @@ class Kflow:
 
     def _apply_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "apply")
+        ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in step.manifests:
-                self.kube.apply_file(m, namespace=resource.namespace)
+                self.kube.apply_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
-            self._helm_upgrade(step.helm)
+            self._helm_upgrade(step.helm, resource)
         elif step.kind == "kustomize" and step.kustomize:
             self.kube.apply_kustomize(step.kustomize.path)
         elif step.kind == "wait" and step.wait:
-            ns = step.wait.namespace or resource.namespace
+            wait_ns = step.wait.namespace or ns
             result = self.kube.wait_for(
                 step.wait.for_resource,
                 step.wait.condition,
-                namespace=ns,
+                namespace=wait_ns,
                 timeout=step.wait.timeout,
                 jsonpath=step.wait.jsonpath,
             )
             self._check_wait_result(result)
         elif step.kind == "rollout-wait" and step.rollout_wait:
             spec = step.rollout_wait
-            ns = spec.namespace or resource.namespace
-            self.kube.rollout_wait_all(ns, kinds=spec.kinds, selector=spec.selector,
+            rollout_ns = spec.namespace or ns or resource.namespace
+            self.kube.rollout_wait_all(rollout_ns, kinds=spec.kinds, selector=spec.selector,
                                        timeout=spec.timeout)
         elif step.kind == "script" and step.script:
             self._run_script(resource, step.script, step.script.run)
@@ -1108,15 +1141,16 @@ class Kflow:
         elif step.kind == "configmap" and step.configmap:
             self._apply_configmap(resource, step)
         elif step.kind == "exec" and step.exec_spec:
-            self._exec_step(resource, step.exec_spec, step.exec_spec.command)
+            self._exec_step(resource, step, step.exec_spec.command)
         elif step.kind == "docker-build" and step.docker_build:
             self._run_docker_build(resource, step.docker_build)
 
     def _destroy_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "destroy")
+        ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in reversed(step.manifests):
-                self.kube.delete_file(m, namespace=resource.namespace)
+                self.kube.delete_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
             self.kube.helm_uninstall(step.helm.release, step.helm.namespace)
         elif step.kind == "kustomize" and step.kustomize:
@@ -1136,42 +1170,43 @@ class Kflow:
         elif step.kind == "secret" and step.secret:
             if not step.secret.if_not_exists:
                 name = step.secret.name or step.name
-                ns = step.secret.namespace or resource.namespace
-                self.kube.secret_delete(name, ns)
+                secret_ns = step.secret.namespace or ns or resource.namespace
+                self.kube.secret_delete(name, secret_ns)
         elif step.kind == "configmap" and step.configmap:
             if not step.configmap.if_not_exists:
                 name = step.configmap.name or step.name
-                ns = step.configmap.namespace or resource.namespace
-                self.kube.configmap_delete(name, ns)
+                cm_ns = step.configmap.namespace or ns or resource.namespace
+                self.kube.configmap_delete(name, cm_ns)
         elif step.kind == "exec" and step.exec_spec:
             if step.exec_spec.on_destroy is not None:
-                self._exec_step(resource, step.exec_spec, step.exec_spec.on_destroy)
+                self._exec_step(resource, step, step.exec_spec.on_destroy)
         elif step.kind == "docker-build":
             pass  # docker images are not removed on destroy
 
     def _reload_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "reload")
+        ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in step.manifests:
-                self.kube.apply_file(m, namespace=resource.namespace)
+                self.kube.apply_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
-            self._helm_upgrade(step.helm)
+            self._helm_upgrade(step.helm, resource)
         elif step.kind == "kustomize" and step.kustomize:
             self.kube.apply_kustomize(step.kustomize.path)
         elif step.kind == "wait" and step.wait:
-            ns = step.wait.namespace or resource.namespace
+            wait_ns = step.wait.namespace or ns
             result = self.kube.wait_for(
                 step.wait.for_resource,
                 step.wait.condition,
-                namespace=ns,
+                namespace=wait_ns,
                 timeout=step.wait.timeout,
                 jsonpath=step.wait.jsonpath,
             )
             self._check_wait_result(result)
         elif step.kind == "rollout-wait" and step.rollout_wait:
             spec = step.rollout_wait
-            ns = spec.namespace or resource.namespace
-            self.kube.rollout_wait_all(ns, kinds=spec.kinds, selector=spec.selector,
+            rollout_ns = spec.namespace or ns or resource.namespace
+            self.kube.rollout_wait_all(rollout_ns, kinds=spec.kinds, selector=spec.selector,
                                        timeout=spec.timeout)
         elif step.kind == "script" and step.script:
             cmd = step.script.on_reload if step.script.on_reload is not None else step.script.run
@@ -1187,7 +1222,7 @@ class Kflow:
         elif step.kind == "exec" and step.exec_spec:
             spec = step.exec_spec
             cmd = spec.on_reload if spec.on_reload is not None else spec.command
-            self._exec_step(resource, spec, cmd)
+            self._exec_step(resource, step, cmd)
         elif step.kind == "docker-build" and step.docker_build:
             self._run_docker_build(resource, step.docker_build)
 
@@ -1223,7 +1258,7 @@ class Kflow:
     def _apply_secret(self, resource: ResourceDef, step: StepDef) -> None:
         spec = step.secret
         name = spec.name or step.name
-        ns = spec.namespace or resource.namespace
+        ns = spec.namespace or self._eff_ns(resource, step) or resource.namespace
         if spec.if_not_exists and self.kube.resource_exists("secret", name, ns):
             self.console.print(f"  [dim]secret/{name} already exists; skipping[/dim]")
             return
@@ -1246,7 +1281,7 @@ class Kflow:
     def _apply_configmap(self, resource: ResourceDef, step: StepDef) -> None:
         spec = step.configmap
         name = spec.name or step.name
-        ns = spec.namespace or resource.namespace
+        ns = spec.namespace or self._eff_ns(resource, step) or resource.namespace
         if spec.if_not_exists and self.kube.resource_exists("configmap", name, ns):
             self.console.print(f"  [dim]configmap/{name} already exists; skipping[/dim]")
             return
@@ -1259,10 +1294,12 @@ class Kflow:
             from_dir=spec.from_dir,
         )
 
-    def _exec_step(self, resource: ResourceDef, spec: ExecSpec,
+    def _exec_step(self, resource: ResourceDef, step: StepDef,
                    command: List[str]) -> None:
+        spec = step.exec_spec
+        ns = self._eff_ns(resource, step) or resource.namespace
         result = self.kube.exec(
-            resource.namespace,
+            ns,
             command=command,
             pod=spec.pod,
             selector=spec.selector,
@@ -1294,12 +1331,14 @@ class Kflow:
             run_command(["docker", "push", spec.tag],
                         check=True, capture=not self.verbose)
 
-    def _helm_upgrade(self, helm: HelmSpec, *, wait: bool = False, timeout: int = 300) -> None:
+    def _helm_upgrade(self, helm: HelmSpec, resource: ResourceDef, *,
+                      wait: bool = False, timeout: int = 300) -> None:
         self.kube.helm_upgrade(
             helm.release, helm.chart, helm.namespace,
             version=helm.version, values_files=helm.values_files,
             set_values=helm.set_values, repo_name=helm.repo_name,
             repo_url=helm.repo_url, wait=wait, timeout=timeout,
+            create_namespace=self._should_create_ns(resource),
         )
 
     # -- workload targeting ----------------------------------------------
@@ -1374,16 +1413,23 @@ class Kflow:
               timeout: int = 300) -> List[str]:
         targets = self.resolve_targets(names, operation="apply", with_deps=with_deps)
         self._banner("apply", targets)
-        ensured: set = set()
+        ns_ensured: set = set()
         for nid in self.graph.node_order:
             rname = self.graph.node_res[nid]
             if rname not in targets:
                 continue
             resource = self.config.resource_map[rname]
             step = self.graph.node_step[nid]
-            if rname not in ensured:
-                self.kube.ensure_namespace(resource.namespace)
-                ensured.add(rname)
+            if self._should_create_ns(resource):
+                eff_ns = self._eff_ns(resource, step)
+                if eff_ns and eff_ns not in ns_ensured:
+                    self.kube.ensure_namespace(eff_ns)
+                    ns_ensured.add(eff_ns)
+                if step.kind == "helm" and step.helm:
+                    helm_ns = step.helm.namespace
+                    if helm_ns and helm_ns not in ns_ensured:
+                        self.kube.ensure_namespace(helm_ns)
+                        ns_ensured.add(helm_ns)
             self._apply_step(resource, step)
             if wait and nid == self.graph.last_node[rname]:
                 self._wait_resource(resource, timeout)
@@ -1435,17 +1481,25 @@ class Kflow:
                timeout: int = 300) -> List[str]:
         targets = self.resolve_targets(names, operation="reload", with_deps=with_deps)
         self._banner("reload", targets)
-        ensured: set = set()
+        ns_ensured: set = set()
         # 1) re-apply manifests/helm/runner config non-destructively, in order.
         for nid in self.graph.node_order:
             rname = self.graph.node_res[nid]
             if rname not in targets:
                 continue
             resource = self.config.resource_map[rname]
-            if rname not in ensured:
-                self.kube.ensure_namespace(resource.namespace)
-                ensured.add(rname)
-            self._reload_step(resource, self.graph.node_step[nid])
+            step = self.graph.node_step[nid]
+            if self._should_create_ns(resource):
+                eff_ns = self._eff_ns(resource, step)
+                if eff_ns and eff_ns not in ns_ensured:
+                    self.kube.ensure_namespace(eff_ns)
+                    ns_ensured.add(eff_ns)
+                if step.kind == "helm" and step.helm:
+                    helm_ns = step.helm.namespace
+                    if helm_ns and helm_ns not in ns_ensured:
+                        self.kube.ensure_namespace(helm_ns)
+                        ns_ensured.add(helm_ns)
+            self._reload_step(resource, step)
         # 2) restart affected workloads so they pick up new config.
         for rname in targets:
             resource = self.config.resource_map[rname]
@@ -1460,13 +1514,18 @@ class Kflow:
         targets = self.resolve_targets(names, operation="apply", with_deps=with_deps)
         self._banner("helm", targets)
         touched = []
+        ns_ensured: set = set()
         for rname in targets:
             resource = self.config.resource_map[rname]
             for step in resource.steps:
                 if step.kind == "helm" and step.helm:
-                    self.kube.ensure_namespace(step.helm.namespace)
+                    if self._should_create_ns(resource):
+                        helm_ns = step.helm.namespace
+                        if helm_ns and helm_ns not in ns_ensured:
+                            self.kube.ensure_namespace(helm_ns)
+                            ns_ensured.add(helm_ns)
                     self._step_header(resource, step, "helm")
-                    self._helm_upgrade(step.helm)
+                    self._helm_upgrade(step.helm, resource)
                     touched.append(rname)
         if not touched:
             self.console.print("  [yellow]no helm-backed resources in selection[/yellow]")

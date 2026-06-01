@@ -95,10 +95,12 @@ kflow apply [OPTIONS] [NAMES...]
 
 1. Resolves the target set (adds dependencies unless `--no-deps`).
 2. For each step in topological order:
-   - Ensures the resource's namespace exists (creates it if needed).
+   - If `autoCreateNamespace` is enabled (globally or per-resource), creates any missing namespace before the step runs.
    - Executes the step (manifest apply, helm upgrade, runner `pre_apply`→`apply`→`post_apply`, etc.).
 3. After the last step of each resource, waits for its workloads to roll out (unless `--no-wait`).
 4. Records apply state (phase, namespace, manifest hashes, timestamps) for each target.
+
+Namespace auto-creation is **disabled by default**. Enable it with `autoCreateNamespace: true` in the root config (global) or in a resource definition (per-resource). See [configuration.md](configuration.md#autocreatenamespace).
 
 **Examples**
 
@@ -212,6 +214,7 @@ kflow reload [OPTIONS] [NAMES...]
 **What it does:**
 
 1. Re-applies every step using reload semantics (no deletes/recreates):
+   - If `autoCreateNamespace` is enabled, creates any missing namespace before each step.
    - Manifest/kustomize steps: `kubectl apply` (same as apply).
    - Helm steps: `helm upgrade --install` (same as apply).
    - Script steps: runs `onReload:` if defined, otherwise re-runs `run:`.

@@ -40,6 +40,8 @@ state:
 
 context: my-cluster
 
+autoCreateNamespace: true   # create missing namespaces automatically (default: false)
+
 runners:
   - runners/db_runner.py
   - runners/cache_runner.py
@@ -113,6 +115,16 @@ Each phase entry is either a bare string (name only) or a mapping with:
 | `name` | yes | Phase identifier. Referenced by `phase:` in resource definitions. |
 | `description` | no | Human-readable label shown in `kflow graph` and `kflow list`. |
 
+#### `autoCreateNamespace`
+
+```yaml
+autoCreateNamespace: true
+```
+
+When `true`, kflow creates any missing namespace before applying each step that needs it. Namespaces are created via `kubectl apply` with an `app.kubernetes.io/managed-by: kflow` label, and the call is idempotent (skipped if the namespace already exists). `default` is never created (Kubernetes always provides it).
+
+Default: `false`. Can be overridden per-resource with `autoCreateNamespace:` in a resource definition.
+
 #### `resources`
 
 ```yaml
@@ -143,6 +155,7 @@ phase: apps
 description: Demo web application.
 
 keepNamespace: false
+autoCreateNamespace: true   # override global setting for this resource
 
 dependsOn:
   - longhorn-ingress          # wait for this whole resource
@@ -154,11 +167,16 @@ workloads:
   - deployment/api
 
 steps:
+  - name: crds
+    noNamespace: true           # cluster-scoped — no -n flag
+    manifests:
+      - manifests/app-crds.yaml
   - name: config
     manifests:
       - manifests/app-configmap.yaml
   - name: deploy
     dependsOn: [config, longhorn-ingress]
+    namespace: demo-staging     # override resource namespace for this step only
     manifests:
       - manifests/app-deployment.yaml
   - name: wait-ready
@@ -181,10 +199,11 @@ steps:
 | Field | Required | Description |
 | --- | --- | --- |
 | `name` | yes | Unique resource identifier. Used in `dependsOn` references and CLI targeting. |
-| `namespace` | no | Kubernetes namespace. Default: `default`. Applied as `-n <ns>` to every manifest/helm step that doesn't override it. |
+| `namespace` | no | Kubernetes namespace. Default: `default`. Applied as `-n <ns>` to every step that doesn't override it. |
 | `phase` | no | Which phase this resource belongs to. Must match a name declared in `phases:`. Omit to use the implicit default phase. |
 | `description` | no | Human-readable description shown in `kflow list`. |
 | `keepNamespace` | no | When `true`, `kflow destroy --delete-namespaces` skips deleting this resource's namespace. Default: `false`. |
+| `autoCreateNamespace` | no | Override the root config `autoCreateNamespace` for this resource only. `true` creates namespaces before applying steps; `false` disables it even when the global setting is on. Omit to inherit the global setting. |
 | `dependsOn` | no | Resource-level dependencies. The first step of this resource will not start until these are complete. Each entry is a resource name or a `resource.step` reference. |
 | `selector` | no | Label selector (e.g. `app=web`) used by `restart`, `reload`, and `logs` to find live workloads. |
 | `workloads` | no | Explicit list of `kind/name` entries (e.g. `deployment/web`) for restart/reload. When set, takes precedence over `selector` for rollout operations. |
@@ -562,6 +581,17 @@ Every step, regardless of type, supports:
 | --- | --- | --- |
 | `name` | yes | Unique name within the resource. Used in `dependsOn` references. |
 | `dependsOn` | no | List of step/resource names this step must wait for. See [Dependency references](#dependency-references). |
+| `namespace` | no | Override the resource namespace for this step. Applies to `manifest`, `exec`, `runner`, `wait`, and `rolloutWait` steps. `secret` and `configmap` steps prefer their own `namespace:` field, falling back to this. `helm` and `kustomize` ignore it. |
+| `noNamespace` | no | When `true`, no `-n <namespace>` flag is passed to kubectl for this step. Use for cluster-scoped resources (CRDs, ClusterRoles, Namespaces, etc.). Default: `false`. Has no effect on `exec` steps (which always need a namespace to locate the target pod). |
+
+### Namespace resolution order
+
+For most step types, the namespace used is determined as follows (first match wins):
+
+1. **Step-type's own `namespace:` field** (only `wait`, `rolloutWait`, `secret`, `configmap`, `helm`)
+2. **Step-level `noNamespace: true`** → no namespace flag (cluster-scoped)
+3. **Step-level `namespace:`** → use that namespace
+4. **Resource-level `namespace:`** → the resource's default namespace
 
 ---
 
