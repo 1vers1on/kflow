@@ -536,7 +536,7 @@ def test_docker_build_dry_run_does_not_exec(tmp_path, monkeypatch, recorder):
     engine = Kflow(cfg, dry_run=True)
 
     ran = []
-    monkeypatch.setattr("kflow.core.run_command",
+    monkeypatch.setattr("kflow.engine.run_command",
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
     assert ran == []  # dry_run skips docker build
@@ -552,7 +552,7 @@ def test_docker_build_runs_docker(tmp_path, monkeypatch, recorder):
     engine = Kflow(cfg)
 
     ran = []
-    monkeypatch.setattr("kflow.core.run_command",
+    monkeypatch.setattr("kflow.engine.run_command",
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
     assert any("docker" in str(c) and "build" in str(c) for c in ran), ran
@@ -569,7 +569,7 @@ def test_docker_build_also_pushes(tmp_path, monkeypatch, recorder):
     engine = Kflow(cfg)
 
     ran = []
-    monkeypatch.setattr("kflow.core.run_command",
+    monkeypatch.setattr("kflow.engine.run_command",
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
     cmds = [" ".join(str(t) for t in c) for c in ran]
@@ -587,7 +587,7 @@ def test_docker_build_destroy_is_noop(tmp_path, monkeypatch, recorder):
     engine = Kflow(cfg)
 
     ran = []
-    monkeypatch.setattr("kflow.core.run_command",
+    monkeypatch.setattr("kflow.engine.run_command",
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
     ran.clear()

@@ -16,6 +16,9 @@ state:
 # Optional: pin a kubeconfig context. Omit to use the active context.
 # context: my-cluster
 
+# Automatically create missing namespaces before applying resources.
+autoCreateNamespace: true
+
 # Custom runner files registered globally. Each file may define one or more
 # BaseRunner subclasses; they become available to any resource by class name.
 runners:
