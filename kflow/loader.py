@@ -163,9 +163,21 @@ def _parse_wait(spec: dict, resource_name: str) -> WaitSpec:
     )
 
 
+_VALID_ROLLOUT_KINDS = {"deployment", "statefulset", "daemonset", "replicaset"}
+
+
 def _parse_rollout_wait(spec: dict, resource_name: str) -> RolloutWaitSpec:
     raw_kinds = spec.get("kinds")
-    kinds = list(raw_kinds) if raw_kinds else ["deployment", "statefulset", "daemonset"]
+    if raw_kinds:
+        kinds = list(raw_kinds)
+        bad = {k.lower() for k in kinds} - _VALID_ROLLOUT_KINDS
+        if bad:
+            raise ConfigError(
+                f"rollout-wait for {resource_name!r} contains unsupported kinds: "
+                f"{sorted(bad)}. Valid kinds: {sorted(_VALID_ROLLOUT_KINDS)}"
+            )
+    else:
+        kinds = ["deployment", "statefulset", "daemonset"]
     return RolloutWaitSpec(
         kinds=kinds,
         namespace=spec.get("namespace"),

@@ -1,5 +1,5 @@
 """Tests for new step kinds added in this release:
-secret, configmap, exec, docker-build, URL manifests, wait jsonpath.
+secret, configmap, exec, docker-build, URL manifests, wait jsonpath, rollout-wait.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from kflow.core import (
     SecretSpec,
     ConfigMapSpec,
     WaitSpec,
+    RolloutWaitSpec,
     _is_url,
     _parse_docker_build,
     _parse_exec,
@@ -23,6 +24,7 @@ from kflow.core import (
     _parse_secret,
     _parse_configmap,
     _parse_wait,
+    _parse_rollout_wait,
     _parse_manifests,
     load_root_config,
     DependencyGraph,
@@ -755,3 +757,136 @@ def test_docker_build_destroy_is_noop(tmp_path, monkeypatch, recorder):
     engine.destroy()
     # docker images are not removed on destroy
     assert all("docker" not in str(c) for c in ran), ran
+
+
+# --------------------------------------------------------------------------- #
+# rollout-wait step
+# --------------------------------------------------------------------------- #
+
+def test_parse_rollout_wait_defaults():
+    spec = _parse_rollout_wait({}, "res")
+    assert spec.kinds == ["deployment", "statefulset", "daemonset"]
+    assert spec.selector is None
+    assert spec.namespace is None
+    assert spec.timeout == 300
+
+
+def test_parse_rollout_wait_explicit_kinds():
+    spec = _parse_rollout_wait({"kinds": ["deployment", "replicaset"]}, "res")
+    assert spec.kinds == ["deployment", "replicaset"]
+
+
+def test_parse_rollout_wait_replicaset_valid():
+    spec = _parse_rollout_wait({"kinds": ["replicaset"]}, "res")
+    assert spec.kinds == ["replicaset"]
+
+
+def test_parse_rollout_wait_all_supported_kinds():
+    kinds = ["deployment", "statefulset", "daemonset", "replicaset"]
+    spec = _parse_rollout_wait({"kinds": kinds}, "res")
+    assert spec.kinds == kinds
+
+
+def test_parse_rollout_wait_invalid_kind_raises():
+    with pytest.raises(ConfigError, match="unsupported kinds"):
+        _parse_rollout_wait({"kinds": ["deployment", "job"]}, "res")
+
+
+def test_parse_rollout_wait_selector_and_timeout():
+    spec = _parse_rollout_wait(
+        {"selector": "app=myapp", "timeout": 60, "namespace": "prod"}, "res"
+    )
+    assert spec.selector == "app=myapp"
+    assert spec.timeout == 60
+    assert spec.namespace == "prod"
+
+
+def test_rollout_wait_step_in_resource(tmp_path):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "wait-all",
+         "rolloutWait": {"kinds": ["deployment", "replicaset"], "selector": "app=x"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    step = cfg.resource_map["myapp"].steps[0]
+    assert step.kind == "rollout-wait"
+    assert step.rollout_wait.kinds == ["deployment", "replicaset"]
+    assert step.rollout_wait.selector == "app=x"
+
+
+def test_rollout_wait_empty_mapping_uses_defaults(tmp_path):
+    _write_resource(tmp_path, "myapp", [{"name": "wait", "rolloutWait": {}}])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    step = cfg.resource_map["myapp"].steps[0]
+    assert step.rollout_wait.kinds == ["deployment", "statefulset", "daemonset"]
+    assert step.rollout_wait.timeout == 300
+
+
+def test_rollout_wait_calls_rollout_wait_all(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "wait", "rolloutWait": {"kinds": ["deployment", "replicaset"]}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    calls = []
+    monkeypatch.setattr(engine.kube, "rollout_wait_all",
+                        lambda ns, kinds=None, selector=None, timeout=300:
+                        calls.append({"ns": ns, "kinds": kinds}))
+    engine.apply(wait=False)
+    assert len(calls) == 1
+    assert calls[0]["kinds"] == ["deployment", "replicaset"]
+
+
+def test_rollout_wait_destroy_is_noop(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "wait", "rolloutWait": {}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    calls = []
+    monkeypatch.setattr(engine.kube, "rollout_wait_all",
+                        lambda *a, **kw: calls.append(1))
+    engine.apply(wait=False)
+    calls.clear()
+    engine.destroy()
+    assert calls == []  # rollout-wait is a no-op on destroy
+
+
+def test_get_workloads_includes_replicasets_when_requested(monkeypatch):
+    from kflow.runners.kube import KubeClient
+
+    kube = KubeClient(dry_run=False)
+    captured = []
+
+    def fake_get_json(args):
+        captured.append(args)
+        return {}
+
+    monkeypatch.setattr(kube, "get_json", fake_get_json)
+    kube.get_workloads("my-ns", kinds=["deployment", "replicaset"])
+
+    assert len(captured) == 1
+    resource_arg = captured[0][1]  # second element is the resource list
+    assert "deployments" in resource_arg
+    assert "replicasets" in resource_arg
+
+
+def test_get_workloads_default_excludes_replicasets(monkeypatch):
+    from kflow.runners.kube import KubeClient
+
+    kube = KubeClient(dry_run=False)
+    captured = []
+
+    monkeypatch.setattr(kube, "get_json", lambda args: captured.append(args) or {})
+    kube.get_workloads("my-ns")
+
+    resource_arg = captured[0][1]
+    assert "replicasets" not in resource_arg
+    assert "deployments" in resource_arg

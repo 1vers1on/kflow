@@ -374,7 +374,7 @@ Wait for every rollout of the given workload kinds in a namespace to complete. R
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `kinds` | no | List of workload kinds to enumerate. Default: `[deployment, statefulset, daemonset]`. |
+| `kinds` | no | List of workload kinds to enumerate. Default: `[deployment, statefulset, daemonset]`. Supported values: `deployment`, `statefulset`, `daemonset`, `replicaset`. |
 | `selector` | no | Label selector to filter which workloads are waited on (passed as `-l`). Omit to wait on all workloads of the given kinds in the namespace. |
 | `namespace` | no | Namespace to list workloads from. Defaults to the resource namespace. |
 | `timeout` | no | Per-rollout timeout in seconds. Default: `300`. |
@@ -382,6 +382,27 @@ Wait for every rollout of the given workload kinds in a namespace to complete. R
 Unlike `wait`, which targets a single named resource, `rolloutWait` **discovers** all workloads of the requested kinds in the namespace and waits on each in turn. If no resources of a given kind are found it is silently skipped. On **destroy**, rollout-wait steps are no-ops.
 
 `rolloutWait: {}` (an empty mapping) is valid and uses all defaults.
+
+**Supported kinds** — all four map to `kubectl rollout status`:
+
+| Kind | Notes |
+| --- | --- |
+| `deployment` | Default. Standard Deployment workloads. |
+| `statefulset` | Default. StatefulSet workloads (databases, queues, etc.). |
+| `daemonset` | Default. DaemonSet workloads (node agents, log shippers, etc.). |
+| `replicaset` | Opt-in. Raw ReplicaSets not owned by a Deployment. Requires kubectl ≥ 1.21. |
+
+> **Note:** `replicaset` is not in the default list because Deployments manage their own ReplicaSets — including both would double-count the same pods. Only add it when you have standalone ReplicaSets that aren't controlled by a Deployment.
+
+Example opting in to replicaset:
+
+```yaml
+- name: wait-standalone-rs
+  rolloutWait:
+    kinds: [replicaset]
+    selector: app=standalone-worker
+    timeout: 120
+```
 
 ---
 

@@ -260,9 +260,22 @@ class KubeClient:
         except json.JSONDecodeError:
             return {}
 
-    def get_workloads(self, namespace: str, selector: Optional[str] = None) -> list:
-        """Return workload readiness dicts for deployments/statefulsets/daemonsets."""
-        args = ["get", "deployments,statefulsets,daemonsets", "-n", namespace]
+    _WORKLOAD_PLURAL = {
+        "deployment": "deployments",
+        "statefulset": "statefulsets",
+        "daemonset": "daemonsets",
+        "replicaset": "replicasets",
+    }
+
+    def get_workloads(self, namespace: str, selector: Optional[str] = None,
+                      kinds: Optional[Sequence[str]] = None) -> list:
+        """Return workload readiness dicts for the given workload kinds."""
+        if kinds is not None:
+            plural = [self._WORKLOAD_PLURAL.get(k.lower(), k.lower() + "s") for k in kinds]
+        else:
+            plural = ["deployments", "statefulsets", "daemonsets"]
+        resource_list = ",".join(plural)
+        args = ["get", resource_list, "-n", namespace]
         if selector:
             args += ["-l", selector]
         data = self.get_json(args)
