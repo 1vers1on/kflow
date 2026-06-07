@@ -176,6 +176,8 @@ class Kflow:
             self._exec_step(resource, step, step.exec_spec.command)
         elif step.kind == "docker-build" and step.docker_build:
             self._run_docker_build(resource, step.docker_build)
+        elif step.kind == "create-namespace" and step.namespace_spec:
+            self._apply_namespace_step(resource, step)
 
     def _destroy_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "destroy")
@@ -214,6 +216,12 @@ class Kflow:
                 self._exec_step(resource, step, step.exec_spec.on_destroy)
         elif step.kind == "docker-build":
             pass  # docker images are not removed on destroy
+        elif step.kind == "create-namespace" and step.namespace_spec:
+            spec = step.namespace_spec
+            if spec.delete_on_destroy:
+                ns_name = spec.name or self._eff_ns(resource, step) or resource.namespace
+                self.console.print(f"  [dim]deleting namespace {ns_name}[/dim]")
+                self.kube.delete_namespace(ns_name)
 
     def _reload_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "reload")
@@ -257,6 +265,8 @@ class Kflow:
             self._exec_step(resource, step, cmd)
         elif step.kind == "docker-build" and step.docker_build:
             self._run_docker_build(resource, step.docker_build)
+        elif step.kind == "create-namespace" and step.namespace_spec:
+            self._apply_namespace_step(resource, step)
 
     def _run_script(self, resource: ResourceDef, script: ScriptSpec, cmd: str) -> None:
         if self.dry_run:
@@ -325,6 +335,14 @@ class Kflow:
             from_files=spec.from_files,
             from_dir=spec.from_dir,
         )
+
+    def _apply_namespace_step(self, resource: ResourceDef, step: StepDef) -> None:
+        spec = step.namespace_spec
+        ns_name = spec.name or self._eff_ns(resource, step) or resource.namespace
+        if spec.if_not_exists and self.kube.namespace_exists(ns_name):
+            self.console.print(f"  [dim]namespace/{ns_name} already exists; skipping[/dim]")
+            return
+        self.kube.namespace_apply(ns_name, labels=spec.labels, annotations=spec.annotations)
 
     def _exec_step(self, resource: ResourceDef, step: StepDef,
                    command: List[str]) -> None:

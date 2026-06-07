@@ -573,6 +573,42 @@ On **destroy**, docker images are not removed. Under `--dry-run`, the `docker bu
 
 ---
 
+### `createNamespace`
+
+Explicitly create (and optionally delete) a Kubernetes namespace as a step.
+
+```yaml
+- name: create-ns
+  createNamespace:
+    name: my-namespace          # optional; defaults to resource namespace
+    labels:
+      env: production
+      team: platform
+    annotations:
+      linkerd.io/inject: enabled
+    ifNotExists: false          # skip if namespace already exists (default: false)
+    deleteOnDestroy: false      # delete namespace on destroy (default: false)
+```
+
+```yaml
+- name: create-ns
+  createNamespace: {}           # all defaults: create/update resource namespace
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `name` | no | Namespace to create. Defaults to the resource namespace. |
+| `labels` | no | Labels to set on the namespace. The `app.kubernetes.io/managed-by: kflow` label is always added. |
+| `annotations` | no | Annotations to set on the namespace. |
+| `ifNotExists` | no | When `true`, skip the step if the namespace already exists. Default: `false` (apply is always idempotent). |
+| `deleteOnDestroy` | no | When `true`, delete the namespace on `kflow destroy`. Default: `false`. This is an opt-in because namespace deletion removes everything inside it. |
+
+Implemented as `kubectl apply -f -` with an inline namespace manifest, so it is idempotent by default. Use `ifNotExists: true` when you want a one-time create with no subsequent updates.
+
+Use this step to declare a namespace that must exist before later steps (such as `secret` or `manifest`) run, and to attach labels or annotations that `autoCreateNamespace` does not set.
+
+---
+
 ## Cross-cutting step fields
 
 Every step, regardless of type, supports:

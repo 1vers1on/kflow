@@ -21,6 +21,7 @@ from .models import (
     KIND_RESOURCE,
     KFLOW_KEY,
     KustomizeSpec,
+    NamespaceSpec,
     PhaseDef,
     ResourceDef,
     RolloutWaitSpec,
@@ -270,6 +271,16 @@ def _parse_exec(spec: dict, resource_name: str) -> ExecSpec:
     )
 
 
+def _parse_namespace(spec: dict, resource_name: str) -> NamespaceSpec:
+    return NamespaceSpec(
+        name=spec.get("name"),
+        labels=dict(spec.get("labels") or {}),
+        annotations=dict(spec.get("annotations") or {}),
+        if_not_exists=bool(spec.get("ifNotExists", False)),
+        delete_on_destroy=bool(spec.get("deleteOnDestroy", False)),
+    )
+
+
 def _parse_docker_build(spec: dict, base: Path, resource_name: str) -> DockerBuildSpec:
     if "context" not in spec:
         raise ConfigError(f"dockerBuild block for {resource_name!r} is missing 'context'")
@@ -330,10 +341,14 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     if spec.get("dockerBuild"):
         return StepDef(name=name, kind="docker-build", depends_on=depends_on,
                        docker_build=_parse_docker_build(spec["dockerBuild"], base, resource_name), **common)
+    if "createNamespace" in spec:
+        raw = spec["createNamespace"] if isinstance(spec["createNamespace"], dict) else {}
+        return StepDef(name=name, kind="create-namespace", depends_on=depends_on,
+                       namespace_spec=_parse_namespace(raw, resource_name), **common)
     raise ConfigError(
         f"step {name!r} in {resource_name!r} must define one of: "
         "manifests, helm, kustomize, wait, rolloutWait, script, runner, "
-        "secret, configmap, exec, dockerBuild"
+        "secret, configmap, exec, dockerBuild, createNamespace"
     )
 
 

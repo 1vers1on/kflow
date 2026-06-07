@@ -16,6 +16,7 @@ from .loader import (  # noqa: F401
     _parse_helm,
     _parse_kustomize,
     _parse_manifests,
+    _parse_namespace,
     _parse_rollout_wait,
     _parse_runner,
     _parse_script,
@@ -42,6 +43,7 @@ from .models import (  # noqa: F401
     KFLOW_KEY,
     KflowError,
     KustomizeSpec,
+    NamespaceSpec,
     PhaseDef,
     ResourceDef,
     RolloutWaitSpec,
@@ -56,4 +58,4 @@ from .render import render_dot, render_order, render_tree  # noqa: F401
 from .runners.shell import run_command  # noqa: F401
 from .state import StateManager  # noqa: F401
 
-__version__ = "v1.1.0"
+__version__ = "v1.1.1"

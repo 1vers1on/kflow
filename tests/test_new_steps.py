@@ -12,12 +12,14 @@ from kflow.core import (
     ConfigError,
     DockerBuildSpec,
     ExecSpec,
+    NamespaceSpec,
     SecretSpec,
     ConfigMapSpec,
     WaitSpec,
     _is_url,
     _parse_docker_build,
     _parse_exec,
+    _parse_namespace,
     _parse_secret,
     _parse_configmap,
     _parse_wait,
@@ -575,6 +577,165 @@ def test_docker_build_also_pushes(tmp_path, monkeypatch, recorder):
     cmds = [" ".join(str(t) for t in c) for c in ran]
     assert any("docker build" in c for c in cmds)
     assert any("docker push" in c for c in cmds)
+
+
+# --------------------------------------------------------------------------- #
+# create-namespace step
+# --------------------------------------------------------------------------- #
+
+def test_parse_namespace_defaults():
+    spec = _parse_namespace({}, "res")
+    assert spec.name is None
+    assert spec.labels == {}
+    assert spec.annotations == {}
+    assert spec.if_not_exists is False
+    assert spec.delete_on_destroy is False
+
+
+def test_parse_namespace_all_fields():
+    spec = _parse_namespace({
+        "name": "my-ns",
+        "labels": {"env": "prod"},
+        "annotations": {"team": "platform"},
+        "ifNotExists": True,
+        "deleteOnDestroy": True,
+    }, "res")
+    assert spec.name == "my-ns"
+    assert spec.labels == {"env": "prod"}
+    assert spec.annotations == {"team": "platform"}
+    assert spec.if_not_exists is True
+    assert spec.delete_on_destroy is True
+
+
+def test_create_namespace_step_in_resource(tmp_path):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns", "labels": {"env": "prod"}}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    step = cfg.resource_map["myapp"].steps[0]
+    assert step.kind == "create-namespace"
+    assert step.namespace_spec.name == "my-ns"
+    assert step.namespace_spec.labels == {"env": "prod"}
+
+
+def test_create_namespace_bare_mapping(tmp_path):
+    """createNamespace: {} (no sub-fields) is valid and uses all defaults."""
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    step = cfg.resource_map["myapp"].steps[0]
+    assert step.kind == "create-namespace"
+    assert step.namespace_spec.name is None
+
+
+def test_create_namespace_apply_calls_namespace_apply(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns", "labels": {"env": "prod"}}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    calls = []
+    monkeypatch.setattr(
+        engine.kube, "namespace_apply",
+        lambda name, **kw: calls.append((name, kw)) or None,
+    )
+    engine.apply(wait=False)
+    assert len(calls) == 1
+    assert calls[0][0] == "my-ns"
+    assert calls[0][1]["labels"] == {"env": "prod"}
+
+
+def test_create_namespace_defaults_to_resource_namespace(tmp_path, monkeypatch, recorder):
+    """When name is omitted the resource's own namespace is used."""
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    calls = []
+    monkeypatch.setattr(engine.kube, "namespace_apply",
+                        lambda name, **kw: calls.append(name) or None)
+    engine.apply(wait=False)
+    assert calls == ["test"]  # "test" is the namespace set by _write_resource
+
+
+def test_create_namespace_if_not_exists_skips_when_present(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns", "ifNotExists": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    monkeypatch.setattr(engine.kube, "namespace_exists", lambda ns: True)
+    calls = []
+    monkeypatch.setattr(engine.kube, "namespace_apply",
+                        lambda *a, **kw: calls.append(1) or None)
+    engine.apply(wait=False)
+    assert calls == []
+
+
+def test_create_namespace_destroy_default_is_noop(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    monkeypatch.setattr(engine.kube, "namespace_apply", lambda *a, **kw: None)
+    delete_calls = []
+    monkeypatch.setattr(engine.kube, "delete_namespace",
+                        lambda ns, **kw: delete_calls.append(ns) or None)
+    engine.apply(wait=False)
+    engine.destroy()
+    assert delete_calls == []
+
+
+def test_create_namespace_destroy_deletes_when_opted_in(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns", "deleteOnDestroy": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    monkeypatch.setattr(engine.kube, "namespace_apply", lambda *a, **kw: None)
+    delete_calls = []
+    monkeypatch.setattr(engine.kube, "delete_namespace",
+                        lambda ns, **kw: delete_calls.append(ns) or None)
+    engine.apply(wait=False)
+    engine.destroy()
+    assert "my-ns" in delete_calls
+
+
+def test_create_namespace_reload_reapplies(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "ns", "createNamespace": {"name": "my-ns"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    calls = []
+    monkeypatch.setattr(engine.kube, "namespace_apply",
+                        lambda name, **kw: calls.append(name) or None)
+    engine.apply(wait=False)
+    engine.reload(wait=False)
+    assert calls.count("my-ns") == 2
 
 
 def test_docker_build_destroy_is_noop(tmp_path, monkeypatch, recorder):

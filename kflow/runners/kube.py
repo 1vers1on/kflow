@@ -120,6 +120,21 @@ class KubeClient:
         )
         self.apply_stdin(manifest)
 
+    def namespace_apply(self, name: str, *,
+                        labels: Optional[dict] = None,
+                        annotations: Optional[dict] = None) -> CommandResult:
+        """Create or update a namespace with optional labels/annotations (idempotent)."""
+        all_labels = {"app.kubernetes.io/managed-by": "kflow"}
+        all_labels.update(labels or {})
+        manifest = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {name}\n  labels:\n"
+        for k, v in all_labels.items():
+            manifest += f"    {k}: {v}\n"
+        if annotations:
+            manifest += "  annotations:\n"
+            for k, v in annotations.items():
+                manifest += f"    {k}: {v}\n"
+        return self.apply_stdin(manifest)
+
     def delete_namespace(self, namespace: str, *, wait: bool = False) -> CommandResult:
         args = ["delete", "namespace", namespace, "--ignore-not-found"]
         if not wait:

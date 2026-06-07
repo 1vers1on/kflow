@@ -123,6 +123,16 @@ class ExecSpec:
 
 
 @dataclass
+class NamespaceSpec:
+    """Explicitly create (and optionally delete) a Kubernetes namespace."""
+    name: Optional[str] = None          # defaults to the resource namespace
+    labels: dict = field(default_factory=dict)
+    annotations: dict = field(default_factory=dict)
+    if_not_exists: bool = False         # skip if already exists
+    delete_on_destroy: bool = False     # delete on destroy (opt-in, destructive)
+
+
+@dataclass
 class DockerBuildSpec:
     """Build (and optionally push) a Docker image."""
     context: Path
@@ -138,7 +148,7 @@ class DockerBuildSpec:
 class StepDef:
     name: str
     kind: str  # manifest | helm | kustomize | wait | rollout-wait | script | runner |
-               # secret | configmap | exec | docker-build
+               # secret | configmap | exec | docker-build | create-namespace
     depends_on: List[str] = field(default_factory=list)
     manifests: List[Union[Path, str]] = field(default_factory=list)  # Path or URL
     helm: Optional[HelmSpec] = None
@@ -151,6 +161,7 @@ class StepDef:
     configmap: Optional[ConfigMapSpec] = None
     exec_spec: Optional[ExecSpec] = None
     docker_build: Optional[DockerBuildSpec] = None
+    namespace_spec: Optional[NamespaceSpec] = None
     namespace: Optional[str] = None   # override resource namespace for this step
     no_namespace: bool = False         # skip -n flag (cluster-scoped resources)
 
