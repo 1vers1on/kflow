@@ -6,4 +6,4 @@ the *same* literal. ``bump_version.py`` rewrites the string below; importing it
 everywhere keeps ``kflow --version`` from drifting behind a hardcoded copy.
 """
 
-__version__ = "v1.2.1"
+__version__ = "v1.2.2"
