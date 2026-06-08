@@ -173,6 +173,15 @@ class KubeClient:
         args += ["-f", "-"]
         return self.kubectl(args, mutating=True, input_text=manifest)
 
+    def delete_stdin(self, manifest: str, *, namespace: Optional[str] = None,
+                     ignore_not_found: bool = True) -> CommandResult:
+        args = ["delete", "-f", "-"]
+        if namespace:
+            args = ["delete", "-n", namespace, "-f", "-"]
+        if ignore_not_found:
+            args.append("--ignore-not-found")
+        return self.kubectl(args, mutating=True, check=False, input_text=manifest)
+
     def delete_file(self, path, *, namespace: Optional[str] = None,
                     ignore_not_found: bool = True) -> CommandResult:
         args = ["delete", "-f", str(path)]

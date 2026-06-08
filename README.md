@@ -169,6 +169,7 @@ ignored; genuine same-phase cycles are broken deterministically with a warning.
 | `validate` | Validate config and report warnings. |
 | `runners` | List discovered custom runners. |
 | `state show\|path\|clear` | Inspect or manage local state. |
+| `crypto keygen\|encrypt\|decrypt\|info\|keys\|rekey\|verify` | Manage encryption keys and encrypted manifests. |
 
 ### Global flags
 
@@ -254,6 +255,34 @@ and testing patterns.
 | [docs/configuration.md](docs/configuration.md) | Complete YAML reference - every field in the root config, resource definitions, and all ten step types. |
 | [docs/cli.md](docs/cli.md) | Full CLI reference - every command, every flag, targeting behaviour, exit codes. |
 | [docs/writing-runners.md](docs/writing-runners.md) | Runner authoring guide - lifecycle hooks, `RunnerContext` API, dry-run rules, helpers, testing. |
+| [docs/encryption.md](docs/encryption.md) | Encrypted manifests - key management, the `.enc` envelope, the `kflow crypto` commands, and key rotation. |
+
+---
+
+## Encrypted manifests
+
+Commit Secrets and other sensitive manifests to git, decrypt them at apply time.
+kflow encrypts whole manifests with Fernet (authenticated AES); the key lives in
+a gitignored `.env`, and the plaintext is decrypted **in memory** and piped to
+`kubectl` over stdin - it never touches disk.
+
+```bash
+kflow crypto keygen --env             # add KFLOW_KEY=... to .env (gitignored)
+kflow crypto encrypt db-secret.yaml   # -> db-secret.yaml.enc  (commit this)
+```
+
+```yaml
+steps:
+  - name: db-credentials
+    encrypted: true                   # decrypt at runtime using the key in .env
+    manifests:
+      - manifests/db-secret.yaml.enc
+```
+
+Supports named keys for multiple environments, deterministic passphrase-derived
+keys, one-command rotation (`crypto rekey`), and a `crypto verify` CI gate that
+checks every encrypted manifest decrypts before you deploy. Full guide:
+[docs/encryption.md](docs/encryption.md).
 
 ---
 

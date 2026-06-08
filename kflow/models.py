@@ -178,6 +178,8 @@ class StepDef:
     namespace: Optional[str] = None   # override resource namespace for this step
     no_namespace: bool = False         # skip -n flag (cluster-scoped resources)
     server_side: bool = False          # use kubectl apply --server-side for this step
+    encrypted: bool = False            # manifests are kflow-encrypted; decrypt at runtime
+    encryption_key_id: Optional[str] = None  # force a specific key id when decrypting
 
 
 @dataclass

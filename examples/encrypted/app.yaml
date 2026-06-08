@@ -1,0 +1,24 @@
+kflow:
+  version: v1
+  kind: ResourceDefinition
+
+name: app
+namespace: demo
+phase: apps
+description: App whose database credentials are stored encrypted in git.
+
+steps:
+  # The encrypted Secret. kflow decrypts it in memory at apply time (using the
+  # key from .env) and pipes the plaintext to `kubectl apply -f -`. The cleartext
+  # never touches disk.
+  - name: db-credentials
+    encrypted: true
+    manifests:
+      - manifests/db-secret.yaml.enc
+
+  # An ordinary, unencrypted manifest can sit right next to it.
+  - name: deploy
+    dependsOn:
+      - db-credentials
+    manifests:
+      - manifests/deployment.yaml

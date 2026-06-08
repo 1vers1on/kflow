@@ -45,6 +45,7 @@ class Kflow:
         cluster_key = self.context or "default"
         self.state = StateManager(config.state_dir, cluster_key)
         self.registry = RunnerRegistry(console=self.console)
+        self._keyring = None  # lazily built KeyRing for encrypted manifests
         self._load_runners()
 
     @classmethod
@@ -145,12 +146,59 @@ class Kflow:
         finally:
             self.kube.server_side = orig
 
+    # -- encrypted manifests ---------------------------------------------
+
+    def keyring(self):
+        """Lazily build the :class:`KeyRing` from the environment and ``.env``
+        files next to the config and in the working directory."""
+        if self._keyring is None:
+            from .crypto import KeyRing
+            search: List[Path] = []
+            if self.config.path:
+                search.append(Path(self.config.path).parent)
+            search.append(Path.cwd())
+            self._keyring = KeyRing.from_environment(search)
+        return self._keyring
+
+    def _decrypt_manifest(self, step: StepDef, manifest) -> str:
+        """Read an encrypted manifest file and return its decrypted YAML text."""
+        from .crypto import EncryptionError, Envelope
+        from .loader import _is_url
+        if _is_url(str(manifest)):
+            raise KflowError(
+                f"step {step.name!r}: encrypted manifests must be local files, "
+                f"not URLs ({manifest})"
+            )
+        path = Path(manifest)
+        try:
+            envelope_text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise KflowError(f"cannot read encrypted manifest {path}: {exc}") from exc
+        ring = self.keyring()
+        try:
+            if step.encryption_key_id:
+                # Honour the explicit override even if the envelope names another kid.
+                from .crypto import _decrypt_token
+                key = ring.require(step.encryption_key_id)
+                env = Envelope.loads(envelope_text)
+                data = _decrypt_token(env.token, key)
+            else:
+                data = ring.decrypt(envelope_text)
+        except EncryptionError as exc:
+            raise KflowError(
+                f"step {step.name!r}: failed to decrypt {path.name}: {exc}"
+            ) from exc
+        return data.decode("utf-8")
+
     def _apply_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "apply")
         ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in step.manifests:
-                self.kube.apply_file(m, namespace=ns)
+                if step.encrypted:
+                    self.kube.apply_stdin(self._decrypt_manifest(step, m), namespace=ns)
+                else:
+                    self.kube.apply_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
             self._helm_upgrade(step.helm, resource)
         elif step.kind == "kustomize" and step.kustomize:
@@ -194,7 +242,10 @@ class Kflow:
         ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in reversed(step.manifests):
-                self.kube.delete_file(m, namespace=ns)
+                if step.encrypted:
+                    self.kube.delete_stdin(self._decrypt_manifest(step, m), namespace=ns)
+                else:
+                    self.kube.delete_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
             self.kube.helm_uninstall(step.helm.release, step.helm.namespace)
         elif step.kind == "kustomize" and step.kustomize:
@@ -238,7 +289,10 @@ class Kflow:
         ns = self._eff_ns(resource, step)
         if step.kind == "manifest":
             for m in step.manifests:
-                self.kube.apply_file(m, namespace=ns)
+                if step.encrypted:
+                    self.kube.apply_stdin(self._decrypt_manifest(step, m), namespace=ns)
+                else:
+                    self.kube.apply_file(m, namespace=ns)
         elif step.kind == "helm" and step.helm:
             self._helm_upgrade(step.helm, resource)
         elif step.kind == "kustomize" and step.kustomize:

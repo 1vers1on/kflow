@@ -359,7 +359,16 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     ns_override = str(ns_raw) if isinstance(ns_raw, str) and ns_raw else None
     no_ns = bool(spec.get("noNamespace", False))
     server_side = bool(spec.get("serverSide", False))
-    common = {"namespace": ns_override, "no_namespace": no_ns, "server_side": server_side}
+    encrypted = bool(spec.get("encrypted", False))
+    key_id_raw = spec.get("encryptionKeyId")
+    key_id = str(key_id_raw) if key_id_raw else None
+    common = {"namespace": ns_override, "no_namespace": no_ns, "server_side": server_side,
+              "encrypted": encrypted, "encryption_key_id": key_id}
+    if encrypted and not spec.get("manifests"):
+        raise ConfigError(
+            f"step {name!r} in {resource_name!r} sets 'encrypted: true' but has no "
+            "'manifests'. Encryption only applies to manifest steps."
+        )
     if spec.get("manifests"):
         return StepDef(name=name, kind="manifest", depends_on=depends_on,
                        manifests=_parse_manifests(spec["manifests"], base), **common)

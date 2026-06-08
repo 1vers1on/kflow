@@ -390,6 +390,217 @@ def state_clear(app):
     console.print("[green]✓[/green] state cleared")
 
 
+# -- encryption commands ---------------------------------------------------- #
+
+
+@cli.group()
+def crypto():
+    """Generate keys and encrypt/decrypt manifests for safe storage in git."""
+
+
+def _crypto_keyring():
+    """Build a KeyRing from the environment and .env files in the cwd."""
+    from .crypto import KeyRing
+    return KeyRing.from_environment([Path.cwd()])
+
+
+@crypto.command("keygen")
+@click.option("--id", "kid", default=None,
+              help="Key id (becomes KFLOW_KEY_<ID>). Omit for the default key.")
+@click.option("--passphrase", default=None,
+              help="Derive the key deterministically from a passphrase (scrypt).")
+@click.option("--salt", default=None,
+              help="Salt for --passphrase (defaults to a fixed app salt).")
+@click.option("--env", "write_env", is_flag=True,
+              help="Append the key to a .env file instead of only printing it.")
+@click.option("--env-file", default=".env", show_default=True,
+              help="Path to the .env file used with --env.")
+@click.option("--force", is_flag=True,
+              help="With --env, overwrite an existing entry for this key id.")
+@_handle_errors
+def crypto_keygen(kid, passphrase, salt, write_env, env_file, force):
+    """Generate a new encryption key."""
+    from .crypto import (DEFAULT_KID, derive_key, env_var_for, generate_key,
+                         key_fingerprint, parse_dotenv)
+    if passphrase:
+        key = derive_key(passphrase, salt=salt.encode() if salt else None)
+    else:
+        key = generate_key()
+    var = env_var_for(kid or DEFAULT_KID)
+    fp = key_fingerprint(key)
+    if write_env:
+        path = Path(env_file)
+        existing = parse_dotenv(path.read_text()) if path.exists() else {}
+        if var in existing and not force:
+            raise click.ClickException(
+                f"{var} already set in {path}; pass --force to overwrite."
+            )
+        lines = path.read_text().splitlines() if path.exists() else []
+        lines = [ln for ln in lines if not ln.strip().startswith(f"{var}=")]
+        lines.append(f"{var}={key}")
+        path.write_text("\n".join(lines) + "\n")
+        console.print(f"[green]✓[/green] wrote {var} to {path} "
+                      f"[dim](fingerprint {fp})[/dim]")
+        err_console.print(
+            "[yellow]reminder:[/yellow] keep this file out of git "
+            "(.env is gitignored by default)."
+        )
+    else:
+        console.print(f"{var}={key}")
+        err_console.print(
+            f"[dim]fingerprint {fp} — add the line above to your .env "
+            f"(it is gitignored) or export it.[/dim]"
+        )
+
+
+@crypto.command("encrypt")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.option("-o", "--output", default=None,
+              help="Output path (default: <path>.enc).")
+@click.option("--id", "kid", default=None, help="Encrypt with this key id.")
+@click.option("--stdout", "to_stdout", is_flag=True, help="Write to stdout.")
+@click.option("--in-place", is_flag=True,
+              help="Replace the source file with its encrypted form.")
+@click.option("--force", is_flag=True, help="Overwrite an existing output file.")
+@_handle_errors
+def crypto_encrypt(path, output, kid, to_stdout, in_place, force):
+    """Encrypt a manifest (or any file) into a kflow envelope."""
+    src = Path(path)
+    ring = _crypto_keyring()
+    envelope = ring.encrypt(src.read_bytes(), kid=kid, name=src.name)
+    if to_stdout:
+        click.echo(envelope, nl=False)
+        return
+    dest = Path(output) if output else (src if in_place else Path(str(src) + ".enc"))
+    if dest.exists() and not force and not in_place:
+        raise click.ClickException(f"{dest} exists; pass --force to overwrite.")
+    dest.write_text(envelope)
+    console.print(f"[green]✓[/green] encrypted [cyan]{src}[/cyan] → [cyan]{dest}[/cyan]")
+
+
+@crypto.command("decrypt")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.option("-o", "--output", default=None,
+              help="Output path (default: stdout).")
+@click.option("--force", is_flag=True, help="Overwrite an existing output file.")
+@_handle_errors
+def crypto_decrypt(path, output, force):
+    """Decrypt an encrypted manifest back to plaintext."""
+    ring = _crypto_keyring()
+    data = ring.decrypt(Path(path).read_text())
+    if not output:
+        click.echo(data.decode("utf-8"), nl=False)
+        return
+    dest = Path(output)
+    if dest.exists() and not force:
+        raise click.ClickException(f"{dest} exists; pass --force to overwrite.")
+    dest.write_bytes(data)
+    console.print(f"[green]✓[/green] decrypted → [cyan]{dest}[/cyan]")
+
+
+@crypto.command("info")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@_handle_errors
+def crypto_info(path):
+    """Show envelope metadata without decrypting (no key required)."""
+    from .crypto import Envelope, env_var_for
+    env = Envelope.loads(Path(path).read_text())
+    table = Table(box=box.SIMPLE, title=f"envelope: {Path(path).name}")
+    table.add_column("field")
+    table.add_column("value")
+    table.add_row("version", str(env.version))
+    table.add_row("algorithm", env.alg)
+    table.add_row("key id", env.kid)
+    table.add_row("env var", env_var_for(env.kid))
+    table.add_row("created", env.created or "-")
+    table.add_row("original name", env.name or "-")
+    table.add_row("ciphertext bytes", str(len(env.token)))
+    ring = _crypto_keyring()
+    table.add_row("key available", "[green]yes[/green]" if env.kid in ring
+                  else ("[yellow]maybe (other ids)[/yellow]" if ring else "[red]no[/red]"))
+    console.print(table)
+
+
+@crypto.command("rekey")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--to", "new_kid", default=None,
+              help="Re-encrypt with this key id (default: the primary key).")
+@click.option("-o", "--output", default=None, help="Write to a different path.")
+@_handle_errors
+def crypto_rekey(path, new_kid, output):
+    """Decrypt and re-encrypt a file with a different key (rotation)."""
+    from .crypto import Envelope
+    src = Path(path)
+    ring = _crypto_keyring()
+    text = src.read_text()
+    old = Envelope.loads(text)
+    data = ring.decrypt(text)
+    envelope = ring.encrypt(data, kid=new_kid, name=old.name)
+    dest = Path(output) if output else src
+    dest.write_text(envelope)
+    target = new_kid or ring.primary_kid
+    console.print(f"[green]✓[/green] re-keyed [cyan]{dest}[/cyan] "
+                  f"[dim]{old.kid} → {target}[/dim]")
+
+
+@crypto.command("keys")
+@_handle_errors
+def crypto_keys():
+    """List the encryption keys discovered in the environment / .env."""
+    from .crypto import env_var_for, key_fingerprint
+    ring = _crypto_keyring()
+    if not ring:
+        console.print("[dim]no keys found (set KFLOW_KEY or run 'kflow crypto keygen')[/dim]")
+        return
+    table = Table(box=box.SIMPLE, title="encryption keys")
+    for col in ("key id", "env var", "fingerprint", "primary"):
+        table.add_column(col)
+    for kid in ring.kids:
+        table.add_row(kid, env_var_for(kid), key_fingerprint(ring.get(kid)),
+                      "✓" if kid == ring.primary_kid else "")
+    console.print(table)
+
+
+@crypto.command("verify")
+@pass_app
+@_handle_errors
+def crypto_verify(app):
+    """Check that every encrypted manifest in the config can be decrypted."""
+    from .crypto import EncryptionError, Envelope, KeyRing
+    engine = app.engine()
+    search = [Path(engine.config.path).parent, Path.cwd()]
+    ring = KeyRing.from_environment(search)
+    table = Table(box=box.SIMPLE, title="encrypted manifests")
+    for col in ("resource", "step", "manifest", "key id", "status"):
+        table.add_column(col)
+    failures = 0
+    checked = 0
+    for res in engine.config.resources:
+        for step in res.steps:
+            if not step.encrypted:
+                continue
+            for m in step.manifests:
+                checked += 1
+                p = Path(m)
+                try:
+                    env = Envelope.loads(p.read_text())
+                    ring.decrypt(p.read_text())
+                    status = "[green]ok[/green]"
+                    kid = env.kid
+                except (EncryptionError, OSError) as exc:
+                    failures += 1
+                    status = f"[red]{exc}[/red]"
+                    kid = "?"
+                table.add_row(res.name, step.name, p.name, kid, status)
+    if checked == 0:
+        console.print("[dim]no encrypted manifests declared in the config[/dim]")
+        return
+    console.print(table)
+    if failures:
+        raise click.ClickException(f"{failures} encrypted manifest(s) could not be decrypted")
+    console.print(f"[green]✓[/green] all {checked} encrypted manifest(s) decrypt cleanly")
+
+
 # -- helpers ---------------------------------------------------------------- #
 
 

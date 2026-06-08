@@ -531,6 +531,91 @@ Prompts for confirmation unless `--yes` is set. After clearing, all resources ap
 
 ---
 
+## Crypto commands
+
+Generate keys and encrypt/decrypt manifests so sensitive YAML can be committed to git and still applied at runtime. See the [Encrypted manifests](encryption.md) guide for the full picture.
+
+Keys are read from the environment and from `.env` files (`KFLOW_KEY`, `KFLOW_KEY_<ID>`). `.env` is gitignored by the default kflow `.gitignore`.
+
+### `crypto keygen`
+
+Generate a new encryption key.
+
+```
+kflow crypto keygen [--id ID] [--passphrase PHRASE [--salt SALT]] [--env [--env-file PATH] [--force]]
+```
+
+| Flag | Description |
+| --- | --- |
+| `--id` | Key id; produces a `KFLOW_KEY_<ID>=` line. Omit for the default key (`KFLOW_KEY=`). |
+| `--passphrase` | Derive the key deterministically from a passphrase (scrypt) instead of randomly. |
+| `--salt` | Salt for `--passphrase`. Defaults to a fixed app salt; set a project-specific value for real secrets. |
+| `--env` | Append the key to a `.env` file instead of only printing it. |
+| `--env-file` | Path to the `.env` file used with `--env` (default `.env`). |
+| `--force` | With `--env`, overwrite an existing entry for this key id. |
+
+```bash
+kflow crypto keygen --env                 # add KFLOW_KEY=... to ./.env
+kflow crypto keygen --id prod             # print KFLOW_KEY_PROD=...
+kflow crypto keygen --passphrase "…"      # reproducible key from a passphrase
+```
+
+### `crypto encrypt`
+
+Encrypt a manifest (or any file) into a kflow envelope.
+
+```
+kflow crypto encrypt PATH [-o OUT] [--id ID] [--stdout] [--in-place] [--force]
+```
+
+Defaults to writing `<path>.enc`. Uses the primary key unless `--id` is given. `--in-place` replaces the source file; `--stdout` writes the envelope to stdout.
+
+### `crypto decrypt`
+
+Decrypt an encrypted manifest back to plaintext.
+
+```
+kflow crypto decrypt PATH [-o OUT] [--force]
+```
+
+Writes to stdout unless `-o` is given. Selects the key automatically from the envelope's key id, falling back to trying every key on the ring.
+
+### `crypto info`
+
+Show envelope metadata (version, algorithm, key id, timestamp, original name) **without decrypting** — no key required.
+
+```
+kflow crypto info PATH
+```
+
+### `crypto keys`
+
+List the keys discovered in the environment and `.env`, with their ids, env-var names, and fingerprints.
+
+```
+kflow crypto keys
+```
+
+### `crypto rekey`
+
+Decrypt and re-encrypt a file with a different key (rotation).
+
+```
+kflow crypto rekey PATH [--to ID] [-o OUT]
+```
+
+Re-encrypts with `--to` (or the primary key if omitted). Writes back in place unless `-o` is given.
+
+### `crypto verify`
+
+Walk the config, find every `encrypted: true` manifest, and check that each one decrypts with an available key — without contacting the cluster. Exits non-zero if any cannot be decrypted. Useful as a CI gate.
+
+```
+kflow crypto verify
+```
+
+---
+
 ## Exit codes
 
 | Code | Meaning |

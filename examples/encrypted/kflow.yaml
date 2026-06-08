@@ -1,0 +1,23 @@
+# Self-contained example of encrypted manifests.
+#
+# The Secret in manifests/db-secret.yaml.enc is encrypted; the cleartext never
+# lives in git. To run this example, make the demo key available first:
+#
+#     cd examples/encrypted
+#     cp .env.example .env          # .env is gitignored
+#     kflow crypto verify           # confirm it decrypts
+#     kflow --dry-run apply         # see the decrypted Secret piped to kubectl
+#
+# See ../../docs/encryption.md for the full guide.
+kflow:
+  version: v1
+  kind: Config
+
+state:
+  dir: ~/.kflow
+
+phases:
+  - name: apps
+
+resources:
+  - app.yaml

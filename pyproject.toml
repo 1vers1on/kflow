@@ -24,10 +24,12 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "PyYAML>=6.0",
+    "cryptography>=3.4",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+crypto = ["cryptography>=3.4"]
 
 [project.urls]
 Homepage = "https://github.com/1vers1on/kflow"

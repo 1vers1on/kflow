@@ -253,11 +253,27 @@ Apply one or more Kubernetes manifest files (or URLs) with `kubectl apply`.
 | --- | --- | --- |
 | `manifests` | yes | List of paths (relative to the resource file) or `http://`/`https://` URLs. |
 | `serverSide` | no | When `true`, uses `kubectl apply --server-side` for this step. Useful for large manifests and ConfigMaps that exceed the client-side annotation size limit (~256 KB). Default: `false`. |
+| `encrypted` | no | When `true`, the listed files are kflow-encrypted envelopes; kflow decrypts them in memory and applies them over stdin. See [Encrypted manifests](encryption.md). Default: `false`. |
+| `encryptionKeyId` | no | Force decryption with this key id instead of the one recorded in the envelope. Only meaningful with `encrypted: true`. |
 
 - On **apply** and **reload**: `kubectl apply -n <namespace> -f <path>` for each entry (or `kubectl apply --server-side …` when `serverSide: true`).
 - On **destroy**: `kubectl delete -n <namespace> -f <path> --ignore-not-found` for each entry, in reverse order.
 - Manifest hashes are recorded in state; `kflow status` reports files whose content has changed since the last apply as **drift**.
 - Remote URLs are applied as-is but excluded from drift detection.
+
+**Encrypted manifests** (`encrypted: true`) let you commit Secrets and other
+sensitive manifests to git while keeping the plaintext private. The `.enc` files
+are decrypted in memory and piped to `kubectl` over stdin — the cleartext never
+touches disk. Encryption only applies to manifest steps (the loader rejects
+`encrypted: true` elsewhere) and cannot be used with remote URLs. See the full
+[Encrypted manifests](encryption.md) guide.
+
+```yaml
+- name: db-credentials
+  encrypted: true
+  manifests:
+    - manifests/db-secret.yaml.enc
+```
 
 **Example — server-side apply for a large ConfigMap:**
 
@@ -706,6 +722,8 @@ Every step, regardless of type, supports:
 | `namespace` | no | Override the resource namespace for this step. Applies to `manifest`, `exec`, `runner`, `wait`, and `rolloutWait` steps. `secret` and `configmap` steps prefer their own `namespace:` field, falling back to this. `helm` and `kustomize` ignore it. |
 | `noNamespace` | no | When `true`, no `-n <namespace>` flag is passed to kubectl for this step. Use for cluster-scoped resources (CRDs, ClusterRoles, Namespaces, etc.). Default: `false`. Has no effect on `exec` steps (which always need a namespace to locate the target pod). |
 | `serverSide` | no | When `true`, uses `kubectl apply --server-side` for this step on apply and reload. Applies to `manifest`, `kustomize`, `configmap`, `secret`, and `create-namespace` steps. Default: `false`. Can also be set globally at invocation time with `kflow apply --server-side`. |
+| `encrypted` | no | Manifest steps only: the listed files are kflow-encrypted and decrypted at runtime. See [Encrypted manifests](encryption.md). Default: `false`. |
+| `encryptionKeyId` | no | Manifest steps only: force a specific key id when decrypting. |
 
 ### Namespace resolution order
 

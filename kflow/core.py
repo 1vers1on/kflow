@@ -6,6 +6,23 @@ dedicated sub-modules. This file re-exports everything so that existing
 """
 
 from .cli import AppCtx, cli, main  # noqa: F401
+from .crypto import (  # noqa: F401
+    DEFAULT_KID,
+    EncryptionError,
+    Envelope,
+    KeyRing,
+    decrypt_bytes,
+    derive_key,
+    encrypt_bytes,
+    env_var_for,
+    generate_key,
+    is_encrypted,
+    is_encrypted_file,
+    key_fingerprint,
+    load_dotenv_file,
+    normalize_key,
+    parse_dotenv,
+)
 from .engine import Kflow  # noqa: F401
 from .graph import DependencyGraph  # noqa: F401
 from .loader import (  # noqa: F401
