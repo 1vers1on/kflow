@@ -574,33 +574,88 @@ Exactly one of `pod` or `selector` is required. A non-zero exit code from the co
 
 ### `dockerBuild`
 
-Build (and optionally push) a Docker image.
+Build (and optionally push) a Docker image using `docker buildx build`.
 
 ```yaml
 - name: build-api
   dockerBuild:
     context: ../api
-    tag: registry.example.com/myapp/api:latest
-    file: ../api/Dockerfile.prod   # optional; defaults to <context>/Dockerfile
+    tag: myapp/api:latest
+    registry: registry.example.com  # prepended to tag automatically
+    file: ../api/Dockerfile.prod     # optional; defaults to <context>/Dockerfile
     buildArgs:
       VERSION: "1.2.3"
       ENV: production
     push: true
     platform: linux/amd64,linux/arm64
-    target: production             # multi-stage build target
+    target: production               # multi-stage build target
+    extraTags:                       # additional fully-qualified tags
+      - registry.example.com/myapp/api:v1.2.3
+    cacheFrom:
+      - type=registry,ref=registry.example.com/myapp/api:cache
+    cacheTo: type=registry,mode=max,ref=registry.example.com/myapp/api:cache
+    labels:
+      org.opencontainers.image.revision: abc1234
+    builder: my-buildx-instance
+    noCache: false
+    pull: false
+    load: false
+    provenance: max        # false | min | max | mode=max
+    sbom: true             # true | false | generator=<url>
+    network: host
+    onReload: build        # build (default) | skip
 ```
+
+#### Equivalent to the shell pattern
+
+```bash
+REGISTRY_HOST="${REGISTRY_HOST:-localhost:5000}"
+docker buildx build -t "${REGISTRY_HOST}/eaglerxsupervisor:latest" --push .
+```
+
+```yaml
+- name: build
+  dockerBuild:
+    context: .
+    registry: localhost:5000
+    tag: eaglerxsupervisor:latest
+    push: true
+```
+
+#### Fields
 
 | Field | Required | Description |
 | --- | --- | --- |
 | `context` | yes | Docker build context path, relative to the resource file. |
-| `tag` | yes | Image tag (`-t`). |
+| `tag` | yes | Primary image tag. When `registry:` is set it is automatically prepended as `<registry>/<tag>`. |
+| `registry` | no | Registry host (e.g. `localhost:5000`) prepended to `tag`. Convenient when the same registry is used for all builds without repeating it in every tag. |
 | `file` | no | Path to the Dockerfile (`-f`). Defaults to `<context>/Dockerfile`. Relative to the resource file. |
-| `buildArgs` | no | Dict of `--build-arg KEY=VALUE` pairs. |
-| `push` | no | When `true`, run `docker push <tag>` after a successful build. Default: `false`. |
-| `platform` | no | Target platform(s), e.g. `linux/amd64` or `linux/amd64,linux/arm64`. |
+| `buildArgs` | no | Dict of `KEY: value` pairs passed as `--build-arg`. |
+| `push` | no | When `true`, push the image inline with `--push` (requires a registry-accessible builder). Mutually exclusive with `load`. Default: `false`. |
+| `load` | no | When `true`, load the built image into the local Docker daemon with `--load`. Mutually exclusive with `push`. Useful with custom builders when you need the image locally. Default: `false`. |
+| `platform` | no | Target platform(s) passed to `--platform`, e.g. `linux/amd64` or `linux/amd64,linux/arm64`. Multi-platform builds require `push: true` or a custom builder. |
 | `target` | no | Multi-stage build target (`--target`). |
+| `extraTags` | no | Additional fully-qualified image tags (`-t`). The `registry:` prefix is **not** applied to these — specify them in full. |
+| `cacheFrom` | no | List of `--cache-from` entries (e.g. `type=registry,ref=…`, `type=local,src=…`). |
+| `cacheTo` | no | Single `--cache-to` entry (e.g. `type=registry,mode=max,ref=…`). |
+| `labels` | no | Dict of `key: value` pairs passed as `--label`. Useful for OCI image annotations. |
+| `builder` | no | Named buildx builder instance (`--builder`). Omit to use the current default builder. |
+| `noCache` | no | When `true`, pass `--no-cache` to disable layer caching. Default: `false`. |
+| `pull` | no | When `true`, pass `--pull` to always pull base images. Default: `false`. |
+| `provenance` | no | Provenance attestation level: `false`, `min`, `max`, or `mode=max`. Passed as `--provenance`. |
+| `sbom` | no | SBOM attestation: `true`, `false`, or a `generator=<url>` string. Passed as `--sbom`. |
+| `network` | no | Network mode for `RUN` instructions during the build (`--network`). Common values: `host`, `none`. |
+| `onReload` | no | What to do when `kflow reload` runs this step. `build` (default) re-runs the full build; `skip` leaves the existing image untouched. |
 
-On **destroy**, docker images are not removed. Under `--dry-run`, the `docker build` command is printed but not executed.
+#### Behaviour summary
+
+| Operation | Behaviour |
+| --- | --- |
+| apply | Runs `docker buildx build` with all configured flags. |
+| destroy | No-op — docker images are not removed. |
+| reload | Runs `docker buildx build` again unless `onReload: skip`. |
+
+Under `--dry-run`, the full `docker buildx build` command is printed but not executed.
 
 ---
 

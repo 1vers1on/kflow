@@ -298,15 +298,55 @@ def _parse_docker_build(spec: dict, base: Path, resource_name: str) -> DockerBui
         raise ConfigError(f"dockerBuild block for {resource_name!r} is missing 'context'")
     if "tag" not in spec:
         raise ConfigError(f"dockerBuild block for {resource_name!r} is missing 'tag'")
+
+    push = bool(spec.get("push", False))
+    load = bool(spec.get("load", False))
+    if push and load:
+        raise ConfigError(
+            f"dockerBuild block for {resource_name!r}: 'push' and 'load' are mutually exclusive"
+        )
+
+    on_reload = spec.get("onReload", "build")
+    if on_reload not in ("build", "skip"):
+        raise ConfigError(
+            f"dockerBuild block for {resource_name!r}: 'onReload' must be 'build' or 'skip', "
+            f"got {on_reload!r}"
+        )
+
+    # Normalise provenance/sbom — YAML may give a bool where a string is expected.
+    prov_raw = spec.get("provenance")
+    provenance = (
+        None if prov_raw is None
+        else ("false" if prov_raw is False else str(prov_raw))
+    )
+    sbom_raw = spec.get("sbom")
+    sbom = (
+        None if sbom_raw is None
+        else ("true" if sbom_raw is True else ("false" if sbom_raw is False else str(sbom_raw)))
+    )
+
     file_raw = spec.get("file")
     return DockerBuildSpec(
         context=_resolve(base, spec["context"]),
         tag=spec["tag"],
         file=_resolve(base, file_raw) if file_raw else None,
         build_args=dict(spec.get("buildArgs") or {}),
-        push=bool(spec.get("push", False)),
+        push=push,
         platform=spec.get("platform"),
         target=spec.get("target"),
+        registry=spec.get("registry"),
+        extra_tags=list(spec.get("extraTags") or []),
+        cache_from=list(spec.get("cacheFrom") or []),
+        cache_to=spec.get("cacheTo"),
+        labels=dict(spec.get("labels") or {}),
+        builder=spec.get("builder"),
+        no_cache=bool(spec.get("noCache", False)),
+        pull=bool(spec.get("pull", False)),
+        load=load,
+        provenance=provenance,
+        sbom=sbom,
+        network=spec.get("network"),
+        on_reload=on_reload,
     )
 
 

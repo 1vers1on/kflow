@@ -134,14 +134,27 @@ class NamespaceSpec:
 
 @dataclass
 class DockerBuildSpec:
-    """Build (and optionally push) a Docker image."""
+    """Build (and optionally push) a Docker image using docker buildx."""
     context: Path
     tag: str
-    file: Optional[Path] = None      # path to Dockerfile
+    file: Optional[Path] = None          # path to Dockerfile (-f)
     build_args: dict = field(default_factory=dict)
-    push: bool = False
-    platform: Optional[str] = None   # e.g. "linux/amd64,linux/arm64"
-    target: Optional[str] = None     # multi-stage --target
+    push: bool = False                   # --push inline (mutually exclusive with load)
+    platform: Optional[str] = None       # e.g. "linux/amd64,linux/arm64"
+    target: Optional[str] = None         # multi-stage --target
+    registry: Optional[str] = None       # registry host prepended to tag automatically
+    extra_tags: List[str] = field(default_factory=list)   # additional fully-qualified -t tags
+    cache_from: List[str] = field(default_factory=list)   # --cache-from entries
+    cache_to: Optional[str] = None       # --cache-to entry (e.g. "type=registry,mode=max,ref=…")
+    labels: dict = field(default_factory=dict)            # --label key=value pairs
+    builder: Optional[str] = None        # --builder named buildx instance
+    no_cache: bool = False               # --no-cache
+    pull: bool = False                   # --pull always pull base images
+    load: bool = False                   # --load into local Docker daemon (exclusive with push)
+    provenance: Optional[str] = None     # --provenance (false/min/max/mode=max)
+    sbom: Optional[str] = None           # --sbom value (true/false/generator=…)
+    network: Optional[str] = None        # --network flag for build RUN steps
+    on_reload: str = "build"             # "build" (default) or "skip"
 
 
 @dataclass

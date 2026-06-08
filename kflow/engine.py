@@ -274,7 +274,12 @@ class Kflow:
             cmd = spec.on_reload if spec.on_reload is not None else spec.command
             self._exec_step(resource, step, cmd)
         elif step.kind == "docker-build" and step.docker_build:
-            self._run_docker_build(resource, step.docker_build)
+            if step.docker_build.on_reload != "skip":
+                self._run_docker_build(resource, step.docker_build)
+            else:
+                self.console.print(
+                    f"  [dim]skipping docker build on reload (onReload: skip)[/dim]"
+                )
         elif step.kind == "create-namespace" and step.namespace_spec:
             self._apply_namespace_step(resource, step)
 
@@ -372,24 +377,67 @@ class Kflow:
             self.console.print(result.stdout.rstrip())
 
     def _run_docker_build(self, resource: ResourceDef, spec: DockerBuildSpec) -> None:
-        cmd = ["docker", "build", "-t", spec.tag, str(spec.context)]
+        # Compute primary tag, optionally prefixing with a registry host.
+        primary_tag = f"{spec.registry}/{spec.tag}" if spec.registry else spec.tag
+
+        cmd: List[str] = ["docker", "buildx", "build"]
+
+        if spec.builder:
+            cmd += ["--builder", spec.builder]
+
+        cmd += ["-t", primary_tag]
+        for extra in spec.extra_tags:
+            cmd += ["-t", extra]
+
         if spec.file:
             cmd += ["-f", str(spec.file)]
+
         for k, v in spec.build_args.items():
             cmd += ["--build-arg", f"{k}={v}"]
+
+        for k, v in spec.labels.items():
+            cmd += ["--label", f"{k}={v}"]
+
         if spec.platform:
             cmd += ["--platform", spec.platform]
+
         if spec.target:
             cmd += ["--target", spec.target]
+
+        if spec.network:
+            cmd += ["--network", spec.network]
+
+        for cf in spec.cache_from:
+            cmd += ["--cache-from", cf]
+
+        if spec.cache_to:
+            cmd += ["--cache-to", spec.cache_to]
+
+        if spec.push:
+            cmd += ["--push"]
+        elif spec.load:
+            cmd += ["--load"]
+
+        if spec.no_cache:
+            cmd += ["--no-cache"]
+
+        if spec.pull:
+            cmd += ["--pull"]
+
+        if spec.provenance is not None:
+            cmd += ["--provenance", spec.provenance]
+
+        if spec.sbom is not None:
+            cmd += ["--sbom", spec.sbom]
+
+        cmd += [str(spec.context)]
+
         if self.dry_run:
             self.console.print(
                 f"  [dim](dry-run) would run: {' '.join(cmd)}[/dim]"
             )
             return
         run_command(cmd, check=True, capture=not self.verbose)
-        if spec.push:
-            run_command(["docker", "push", spec.tag],
-                        check=True, capture=not self.verbose)
 
     def _helm_upgrade(self, helm: HelmSpec, resource: ResourceDef, *,
                       wait: bool = False, timeout: int = 300) -> None:

@@ -560,10 +560,13 @@ def test_docker_build_runs_docker(tmp_path, monkeypatch, recorder):
     monkeypatch.setattr("kflow.engine.run_command",
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
-    assert any("docker" in str(c) and "build" in str(c) for c in ran), ran
+    cmds = [" ".join(str(t) for t in c) for c in ran]
+    # must use buildx, not the deprecated docker build
+    assert any("docker buildx build" in c for c in cmds), ran
 
 
 def test_docker_build_also_pushes(tmp_path, monkeypatch, recorder):
+    """push: true uses --push inline in the buildx command (not a separate docker push)."""
     _write_resource(tmp_path, "myapp", [
         {"name": "build",
          "dockerBuild": {"context": ".", "tag": "myapp:prod", "push": True}},
@@ -578,8 +581,376 @@ def test_docker_build_also_pushes(tmp_path, monkeypatch, recorder):
                         lambda cmd, **kw: ran.append(cmd) or None)
     engine.apply(wait=False)
     cmds = [" ".join(str(t) for t in c) for c in ran]
-    assert any("docker build" in c for c in cmds)
-    assert any("docker push" in c for c in cmds)
+    # single buildx build command with --push inline; no separate "docker push"
+    assert any("buildx build" in c and "--push" in c for c in cmds), cmds
+    assert not any(c.startswith("docker push") for c in cmds), cmds
+
+
+# --------------------------------------------------------------------------- #
+# docker buildx advanced features
+# --------------------------------------------------------------------------- #
+
+def test_parse_docker_build_registry_prefix(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "registry": "localhost:5000"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.registry == "localhost:5000"
+    assert db.tag == "myapp:latest"
+
+
+def test_parse_docker_build_extra_tags(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest",
+            "extraTags": ["registry.example.com/myapp:v1.2.3", "myapp:stable"]}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.extra_tags == ["registry.example.com/myapp:v1.2.3", "myapp:stable"]
+
+
+def test_parse_docker_build_cache(tmp_path):
+    spec = {
+        "context": ".",
+        "tag": "myapp:latest",
+        "cacheFrom": ["type=registry,ref=localhost:5000/myapp:cache",
+                      "type=local,src=/tmp/cache"],
+        "cacheTo": "type=registry,mode=max,ref=localhost:5000/myapp:cache",
+    }
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert len(db.cache_from) == 2
+    assert db.cache_to == "type=registry,mode=max,ref=localhost:5000/myapp:cache"
+
+
+def test_parse_docker_build_labels(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest",
+            "labels": {"version": "1.0", "maintainer": "team"}}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.labels == {"version": "1.0", "maintainer": "team"}
+
+
+def test_parse_docker_build_builder(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "builder": "my-builder"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.builder == "my-builder"
+
+
+def test_parse_docker_build_load(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "load": True}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.load is True
+    assert db.push is False
+
+
+def test_parse_docker_build_push_and_load_conflict(tmp_path):
+    with pytest.raises(ConfigError, match="mutually exclusive"):
+        _parse_docker_build(
+            {"context": ".", "tag": "myapp:latest", "push": True, "load": True},
+            tmp_path, "res",
+        )
+
+
+def test_parse_docker_build_no_cache_and_pull(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "noCache": True, "pull": True}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.no_cache is True
+    assert db.pull is True
+
+
+def test_parse_docker_build_network(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "network": "host"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.network == "host"
+
+
+def test_parse_docker_build_provenance(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "provenance": "max"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.provenance == "max"
+
+
+def test_parse_docker_build_provenance_bool_false(tmp_path):
+    """YAML `provenance: false` should become the string 'false'."""
+    spec = {"context": ".", "tag": "myapp:latest", "provenance": False}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.provenance == "false"
+
+
+def test_parse_docker_build_sbom_bool(tmp_path):
+    spec_true = {"context": ".", "tag": "myapp:latest", "sbom": True}
+    spec_false = {"context": ".", "tag": "myapp:latest", "sbom": False}
+    assert _parse_docker_build(spec_true, tmp_path, "res").sbom == "true"
+    assert _parse_docker_build(spec_false, tmp_path, "res").sbom == "false"
+
+
+def test_parse_docker_build_sbom_string(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "sbom": "generator=https://example.com"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.sbom == "generator=https://example.com"
+
+
+def test_parse_docker_build_on_reload_skip(tmp_path):
+    spec = {"context": ".", "tag": "myapp:latest", "onReload": "skip"}
+    db = _parse_docker_build(spec, tmp_path, "res")
+    assert db.on_reload == "skip"
+
+
+def test_parse_docker_build_on_reload_invalid(tmp_path):
+    with pytest.raises(ConfigError, match="onReload"):
+        _parse_docker_build(
+            {"context": ".", "tag": "myapp:latest", "onReload": "noop"},
+            tmp_path, "res",
+        )
+
+
+def test_docker_buildx_registry_prefix_in_command(tmp_path, monkeypatch, recorder):
+    """registry: prepends to the primary tag in the buildx command."""
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "eaglerxsupervisor:latest",
+                         "registry": "localhost:5000", "push": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    cmds = [" ".join(str(t) for t in c) for c in ran]
+    assert any("localhost:5000/eaglerxsupervisor:latest" in c for c in cmds), cmds
+    assert any("--push" in c for c in cmds), cmds
+
+
+def test_docker_buildx_extra_tags_in_command(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest",
+                         "extraTags": ["myapp:v1.2.3", "myapp:stable"]}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "myapp:v1.2.3" in full_cmd
+    assert "myapp:stable" in full_cmd
+
+
+def test_docker_buildx_cache_flags_in_command(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {
+             "context": ".", "tag": "myapp:latest",
+             "cacheFrom": ["type=registry,ref=localhost:5000/myapp:cache"],
+             "cacheTo": "type=registry,mode=max,ref=localhost:5000/myapp:cache",
+         }},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--cache-from" in full_cmd
+    assert "--cache-to" in full_cmd
+
+
+def test_docker_buildx_labels_in_command(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest",
+                         "labels": {"version": "1.0"}}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--label" in full_cmd
+    assert "version=1.0" in full_cmd
+
+
+def test_docker_buildx_builder_flag(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest", "builder": "mybuilder"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--builder mybuilder" in full_cmd
+
+
+def test_docker_buildx_load_flag(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:dev", "load": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--load" in full_cmd
+    assert "--push" not in full_cmd
+
+
+def test_docker_buildx_no_cache_and_pull_flags(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest",
+                         "noCache": True, "pull": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--no-cache" in full_cmd
+    assert "--pull" in full_cmd
+
+
+def test_docker_buildx_network_flag(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest", "network": "host"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--network host" in full_cmd
+
+
+def test_docker_buildx_provenance_flag(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest", "provenance": "max"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--provenance max" in full_cmd
+
+
+def test_docker_buildx_sbom_flag(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest", "sbom": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--sbom true" in full_cmd
+
+
+def test_docker_buildx_on_reload_skip(tmp_path, monkeypatch, recorder):
+    """onReload: skip means the build is not re-run when reload is called."""
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest", "onReload": "skip"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    ran.clear()
+    engine.reload(wait=False)
+    assert not any("docker" in str(c) for c in ran), ran
+
+
+def test_docker_buildx_on_reload_build(tmp_path, monkeypatch, recorder):
+    """onReload: build (default) re-runs the build on reload."""
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest"}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    ran.clear()
+    engine.reload(wait=False)
+    cmds = [" ".join(str(t) for t in c) for c in ran]
+    assert any("buildx build" in c for c in cmds), cmds
+
+
+def test_docker_buildx_multi_platform(tmp_path, monkeypatch, recorder):
+    _write_resource(tmp_path, "myapp", [
+        {"name": "build",
+         "dockerBuild": {"context": ".", "tag": "myapp:latest",
+                         "platform": "linux/amd64,linux/arm64", "push": True}},
+    ])
+    _write_config(tmp_path, [str(tmp_path / "myapp.yaml")])
+    cfg = load_root_config(tmp_path / "kflow.yaml")
+    cfg.state_dir = tmp_path / "state"
+    engine = Kflow(cfg)
+
+    ran = []
+    monkeypatch.setattr("kflow.engine.run_command",
+                        lambda cmd, **kw: ran.append(cmd) or None)
+    engine.apply(wait=False)
+    full_cmd = " ".join(str(t) for c in ran for t in c)
+    assert "--platform linux/amd64,linux/arm64" in full_cmd
 
 
 # --------------------------------------------------------------------------- #
