@@ -22,7 +22,10 @@ from .render import render_dot, render_order, render_tree
 from .runners.registry import RunnerLoadError
 from .runners.shell import CommandError
 
-__version__ = "1.0.3"
+# Single source of truth for the version (see kflow/_version.py). Importing it
+# here keeps `kflow --version` accurate instead of drifting behind a hardcoded
+# literal that bump_version.py never touched.
+from ._version import __version__
 
 console = Console()
 err_console = Console(stderr=True)

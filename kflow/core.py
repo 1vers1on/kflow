@@ -57,5 +57,4 @@ from .models import (  # noqa: F401
 from .render import render_dot, render_order, render_tree  # noqa: F401
 from .runners.shell import run_command  # noqa: F401
 from .state import StateManager  # noqa: F401
-
-__version__ = "v1.2.0"
+from ._version import __version__  # noqa: F401

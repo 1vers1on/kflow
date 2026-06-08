@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update the project version in pyproject.toml and kflow/core.py."""
+"""Update the project version in pyproject.toml and kflow/_version.py."""
 
 import re
 import sys
@@ -9,7 +9,7 @@ ROOT = Path(__file__).parent
 
 FILES = [
     (ROOT / "pyproject.toml",   r'(version\s*=\s*")[^"]+(")',  r'\g<1>{ver}\g<2>'),
-    (ROOT / "kflow" / "core.py", r'(__version__\s*=\s*")[^"]+(")', r'\g<1>{ver}\g<2>'),
+    (ROOT / "kflow" / "_version.py", r'(__version__\s*=\s*")[^"]+(")', r'\g<1>{ver}\g<2>'),
 ]
 
 
