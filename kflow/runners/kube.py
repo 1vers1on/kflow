@@ -9,6 +9,7 @@ and skipped when ``dry_run`` is set.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Optional, Sequence
 
 from .shell import CommandResult, format_command, run_command
@@ -419,7 +420,13 @@ class KubeClient:
         for f in (from_files or []):
             args.append(f"--from-file={f}")
         if from_dir:
-            args.append(f"--from-file={from_dir}")
+            # Walk recursively; encode subdirectory separators as "---" so the
+            # init-container templater can reconstruct the original path tree.
+            for file_path in sorted(Path(from_dir).rglob("*")):
+                if file_path.is_file():
+                    rel = file_path.relative_to(from_dir)
+                    key = str(rel).replace("/", "---")
+                    args.append(f"--from-file={key}={file_path}")
         gen = self.kubectl(args, mutating=False, check=True)
         if gen.skipped or not gen.stdout.strip():
             return gen
