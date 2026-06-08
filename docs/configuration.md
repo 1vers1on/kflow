@@ -252,11 +252,21 @@ Apply one or more Kubernetes manifest files (or URLs) with `kubectl apply`.
 | Field | Required | Description |
 | --- | --- | --- |
 | `manifests` | yes | List of paths (relative to the resource file) or `http://`/`https://` URLs. |
+| `serverSide` | no | When `true`, uses `kubectl apply --server-side` for this step. Useful for large manifests and ConfigMaps that exceed the client-side annotation size limit (~256 KB). Default: `false`. |
 
-- On **apply** and **reload**: `kubectl apply -n <namespace> -f <path>` for each entry.
+- On **apply** and **reload**: `kubectl apply -n <namespace> -f <path>` for each entry (or `kubectl apply --server-side …` when `serverSide: true`).
 - On **destroy**: `kubectl delete -n <namespace> -f <path> --ignore-not-found` for each entry, in reverse order.
 - Manifest hashes are recorded in state; `kflow status` reports files whose content has changed since the last apply as **drift**.
 - Remote URLs are applied as-is but excluded from drift detection.
+
+**Example — server-side apply for a large ConfigMap:**
+
+```yaml
+- name: big-config
+  serverSide: true
+  manifests:
+    - manifests/large-configmap.yaml
+```
 
 ---
 
@@ -640,6 +650,7 @@ Every step, regardless of type, supports:
 | `dependsOn` | no | List of step/resource names this step must wait for. See [Dependency references](#dependency-references). |
 | `namespace` | no | Override the resource namespace for this step. Applies to `manifest`, `exec`, `runner`, `wait`, and `rolloutWait` steps. `secret` and `configmap` steps prefer their own `namespace:` field, falling back to this. `helm` and `kustomize` ignore it. |
 | `noNamespace` | no | When `true`, no `-n <namespace>` flag is passed to kubectl for this step. Use for cluster-scoped resources (CRDs, ClusterRoles, Namespaces, etc.). Default: `false`. Has no effect on `exec` steps (which always need a namespace to locate the target pod). |
+| `serverSide` | no | When `true`, uses `kubectl apply --server-side` for this step on apply and reload. Applies to `manifest`, `kustomize`, `configmap`, `secret`, and `create-namespace` steps. Default: `false`. Can also be set globally at invocation time with `kflow apply --server-side`. |
 
 ### Namespace resolution order
 

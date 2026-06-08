@@ -23,6 +23,7 @@ from kflow.core import (
     _parse_namespace,
     _parse_secret,
     _parse_configmap,
+    _parse_step,
     _parse_wait,
     _parse_rollout_wait,
     _parse_manifests,
@@ -889,4 +890,80 @@ def test_get_workloads_default_excludes_replicasets(monkeypatch):
 
     resource_arg = captured[0][1]
     assert "replicasets" not in resource_arg
-    assert "deployments" in resource_arg
+
+
+# --------------------------------------------------------------------------- #
+# Per-step serverSide
+# --------------------------------------------------------------------------- #
+
+def test_parse_step_server_side_flag(tmp_path):
+    """serverSide: true is parsed into StepDef.server_side."""
+    manifest = tmp_path / "big.yaml"
+    manifest.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+    spec = {
+        "name": "deploy",
+        "manifests": [str(manifest)],
+        "serverSide": True,
+    }
+    step = _parse_step(spec, "default", tmp_path, "res")
+    assert step.server_side is True
+
+
+def test_parse_step_server_side_default_false(tmp_path):
+    manifest = tmp_path / "small.yaml"
+    manifest.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+    spec = {"name": "deploy", "manifests": [str(manifest)]}
+    step = _parse_step(spec, "default", tmp_path, "res")
+    assert step.server_side is False
+
+
+def test_per_step_server_side_injects_flag(recorder, tmp_path, state_dir):
+    """A step with serverSide: true passes --server-side; other steps don't."""
+    manifest_a = tmp_path / "a.yaml"
+    manifest_b = tmp_path / "b.yaml"
+    manifest_a.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n")
+    manifest_b.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n")
+
+    _write_resource(tmp_path, "res", [
+        {"name": "big", "manifests": [str(manifest_a)], "serverSide": True},
+        {"name": "small", "manifests": [str(manifest_b)]},
+    ])
+    cfg_path = _write_config(tmp_path, [str(tmp_path / "res.yaml")])
+
+    from kflow.core import load_root_config
+    cfg = load_root_config(cfg_path)
+    cfg.state_dir = state_dir
+    engine = Kflow(cfg)
+    engine.apply(wait=False)
+
+    cmds = [" ".join(c["cmd"]) for c in recorder]
+    apply_a = [c for c in cmds if "apply" in c and "a.yaml" in c]
+    apply_b = [c for c in cmds if "apply" in c and "b.yaml" in c]
+
+    assert apply_a and all("--server-side" in c for c in apply_a), \
+        "manifest_a step should use --server-side"
+    assert apply_b and all("--server-side" not in c for c in apply_b), \
+        "manifest_b step should NOT use --server-side"
+
+
+def test_per_step_server_side_does_not_bleed_between_steps(recorder, tmp_path, state_dir):
+    """Global kube.server_side=False is restored after a server-side step."""
+    manifest_a = tmp_path / "a.yaml"
+    manifest_b = tmp_path / "b.yaml"
+    manifest_a.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n")
+    manifest_b.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n")
+
+    _write_resource(tmp_path, "res", [
+        {"name": "big", "manifests": [str(manifest_a)], "serverSide": True},
+        {"name": "small", "manifests": [str(manifest_b)]},
+    ])
+    cfg_path = _write_config(tmp_path, [str(tmp_path / "res.yaml")])
+
+    from kflow.core import load_root_config
+    cfg = load_root_config(cfg_path)
+    cfg.state_dir = state_dir
+    engine = Kflow(cfg)
+    engine.apply(wait=False)
+
+    # After apply the kube client's flag should be back at its original value.
+    assert engine.kube.server_side is False

@@ -58,4 +58,4 @@ from .render import render_dot, render_order, render_tree  # noqa: F401
 from .runners.shell import run_command  # noqa: F401
 from .state import StateManager  # noqa: F401
 
-__version__ = "v1.1.3"
+__version__ = "v1.1.4"

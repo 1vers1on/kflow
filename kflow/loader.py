@@ -318,7 +318,8 @@ def _parse_step(spec: dict, default_ns: str, base: Path, resource_name: str) -> 
     ns_raw = spec.get("namespace")
     ns_override = str(ns_raw) if isinstance(ns_raw, str) and ns_raw else None
     no_ns = bool(spec.get("noNamespace", False))
-    common = {"namespace": ns_override, "no_namespace": no_ns}
+    server_side = bool(spec.get("serverSide", False))
+    common = {"namespace": ns_override, "no_namespace": no_ns, "server_side": server_side}
     if spec.get("manifests"):
         return StepDef(name=name, kind="manifest", depends_on=depends_on,
                        manifests=_parse_manifests(spec["manifests"], base), **common)

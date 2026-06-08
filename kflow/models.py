@@ -164,6 +164,7 @@ class StepDef:
     namespace_spec: Optional[NamespaceSpec] = None
     namespace: Optional[str] = None   # override resource namespace for this step
     no_namespace: bool = False         # skip -n flag (cluster-scoped resources)
+    server_side: bool = False          # use kubectl apply --server-side for this step
 
 
 @dataclass

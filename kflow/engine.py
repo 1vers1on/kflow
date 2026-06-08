@@ -135,6 +135,16 @@ class Kflow:
             raise CommandError(result.cmd, result.returncode,
                                result.stdout, result.stderr)
 
+    def _with_server_side(self, step: StepDef, fn):
+        """Run fn() with kube.server_side elevated if the step requests it."""
+        orig = self.kube.server_side
+        if step.server_side:
+            self.kube.server_side = True
+        try:
+            return fn()
+        finally:
+            self.kube.server_side = orig
+
     def _apply_step(self, resource: ResourceDef, step: StepDef) -> None:
         self._step_header(resource, step, "apply")
         ns = self._eff_ns(resource, step)
@@ -480,7 +490,7 @@ class Kflow:
                     if helm_ns and helm_ns not in ns_ensured:
                         self.kube.ensure_namespace(helm_ns)
                         ns_ensured.add(helm_ns)
-            self._apply_step(resource, step)
+            self._with_server_side(step, lambda: self._apply_step(resource, step))
             if wait and nid == self.graph.last_node[rname]:
                 self._wait_resource(resource, timeout)
         for rname in targets:
@@ -549,7 +559,7 @@ class Kflow:
                     if helm_ns and helm_ns not in ns_ensured:
                         self.kube.ensure_namespace(helm_ns)
                         ns_ensured.add(helm_ns)
-            self._reload_step(resource, step)
+            self._with_server_side(step, lambda: self._reload_step(resource, step))
         # 2) restart affected workloads so they pick up new config.
         for rname in targets:
             resource = self.config.resource_map[rname]
