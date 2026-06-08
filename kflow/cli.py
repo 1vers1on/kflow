@@ -94,12 +94,16 @@ def cli(ctx, config_path, dry_run, context, verbose, assume_yes):
 @click.option("--no-deps", is_flag=True, help="Do not pull in dependencies of selected resources.")
 @click.option("--no-wait", is_flag=True, help="Do not wait for rollouts to become ready.")
 @click.option("--timeout", default=300, show_default=True, help="Rollout wait timeout (seconds).")
+@click.option("--server-side", is_flag=True,
+              help="Use server-side apply (kubectl apply --server-side). "
+                   "Required for large manifests and ConfigMaps that exceed the client-side annotation limit.")
 @pass_app
 @_handle_errors
-def apply(app, names, no_deps, no_wait, timeout):
+def apply(app, names, no_deps, no_wait, timeout, server_side):
     """Apply manifests and helm charts in dependency order."""
-    app.engine().apply(list(names), with_deps=not no_deps,
-                       wait=not no_wait, timeout=timeout)
+    engine = app.engine()
+    engine.kube.server_side = server_side
+    engine.apply(list(names), with_deps=not no_deps, wait=not no_wait, timeout=timeout)
     _done(app)
 
 
@@ -142,12 +146,15 @@ def restart(app, names, with_deps, no_wait, timeout):
 @click.option("--no-deps", is_flag=True)
 @click.option("--no-wait", is_flag=True)
 @click.option("--timeout", default=300, show_default=True)
+@click.option("--server-side", is_flag=True,
+              help="Use server-side apply when re-applying manifests.")
 @pass_app
 @_handle_errors
-def reload(app, names, no_deps, no_wait, timeout):
+def reload(app, names, no_deps, no_wait, timeout, server_side):
     """Re-apply config non-destructively, then restart affected pods."""
-    app.engine().reload(list(names), with_deps=not no_deps,
-                        wait=not no_wait, timeout=timeout)
+    engine = app.engine()
+    engine.kube.server_side = server_side
+    engine.reload(list(names), with_deps=not no_deps, wait=not no_wait, timeout=timeout)
     _done(app)
 
 

@@ -139,3 +139,46 @@ def test_targeted_apply_pulls_in_dependencies(recorder, state_dir):
     assert "traefik" in targets
     assert "longhorn-storage" in targets
     assert "app" not in targets
+
+
+def test_server_side_apply_adds_flag(recorder, state_dir):
+    engine = _build(state_dir)
+    engine.kube.server_side = True
+    engine.apply(wait=False)
+    cmds = _cmds(recorder)
+    apply_cmds = [c for c in cmds if "kubectl" in c and "apply" in c and "-f" in c]
+    assert apply_cmds, "expected at least one kubectl apply -f call"
+    assert all("--server-side" in c for c in apply_cmds), (
+        "every kubectl apply call must carry --server-side"
+    )
+
+
+def test_server_side_apply_kustomize(recorder, state_dir):
+    """apply_kustomize also passes --server-side when enabled."""
+    from kflow.runners.kube import KubeClient
+    from rich.console import Console
+
+    kube = KubeClient(dry_run=False, server_side=True, console=Console())
+    kube.apply_kustomize("/some/path")
+    cmds = _cmds(recorder)
+    kustomize_cmds = [c for c in cmds if "apply" in c and "-k" in c]
+    assert kustomize_cmds
+    assert all("--server-side" in c for c in kustomize_cmds)
+
+
+def test_server_side_off_by_default(recorder, state_dir):
+    engine = _build(state_dir)
+    engine.apply(wait=False)
+    cmds = _cmds(recorder)
+    apply_cmds = [c for c in cmds if "kubectl" in c and "apply" in c]
+    assert not any("--server-side" in c for c in apply_cmds)
+
+
+def test_server_side_reload(recorder, state_dir):
+    engine = _build(state_dir)
+    engine.kube.server_side = True
+    engine.reload(["app"], wait=False)
+    cmds = _cmds(recorder)
+    apply_cmds = [c for c in cmds if "kubectl" in c and "apply" in c and "-f" in c]
+    assert apply_cmds
+    assert all("--server-side" in c for c in apply_cmds)

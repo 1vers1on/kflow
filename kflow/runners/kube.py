@@ -42,12 +42,14 @@ class KubeClient:
         context: Optional[str] = None,
         kubeconfig: Optional[str] = None,
         dry_run: bool = False,
+        server_side: bool = False,
         console=None,
         verbose: bool = False,
     ):
         self.context = context
         self.kubeconfig = kubeconfig
         self.dry_run = dry_run
+        self.server_side = server_side
         self.console = console
         self.verbose = verbose
 
@@ -153,15 +155,21 @@ class KubeClient:
     # -- manifests --------------------------------------------------------
 
     def apply_file(self, path, *, namespace: Optional[str] = None) -> CommandResult:
-        args = ["apply", "-f", str(path)]
+        args = ["apply"]
+        if self.server_side:
+            args.append("--server-side")
         if namespace:
-            args = ["apply", "-n", namespace, "-f", str(path)]
+            args += ["-n", namespace]
+        args += ["-f", str(path)]
         return self.kubectl(args, mutating=True)
 
     def apply_stdin(self, manifest: str, *, namespace: Optional[str] = None) -> CommandResult:
-        args = ["apply", "-f", "-"]
+        args = ["apply"]
+        if self.server_side:
+            args.append("--server-side")
         if namespace:
-            args = ["apply", "-n", namespace, "-f", "-"]
+            args += ["-n", namespace]
+        args += ["-f", "-"]
         return self.kubectl(args, mutating=True, input_text=manifest)
 
     def delete_file(self, path, *, namespace: Optional[str] = None,
@@ -174,7 +182,11 @@ class KubeClient:
         return self.kubectl(args, mutating=True, check=False)
 
     def apply_kustomize(self, path) -> CommandResult:
-        return self.kubectl(["apply", "-k", str(path)], mutating=True)
+        args = ["apply"]
+        if self.server_side:
+            args.append("--server-side")
+        args += ["-k", str(path)]
+        return self.kubectl(args, mutating=True)
 
     def delete_kustomize(self, path, *, ignore_not_found: bool = True) -> CommandResult:
         args = ["delete", "-k", str(path)]

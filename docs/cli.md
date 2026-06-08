@@ -90,6 +90,7 @@ kflow apply [OPTIONS] [NAMES...]
 | `--no-deps` | off | Do not pull in dependencies of the named resources. |
 | `--no-wait` | off | Do not wait for rollouts to become ready after applying. |
 | `--timeout SECS` | `300` | Rollout wait timeout per workload, in seconds. |
+| `--server-side` | off | Use [server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/) (`kubectl apply --server-side`). Required for large manifests and ConfigMaps that exceed the client-side annotation size limit (~256 KB). |
 
 **What it does, in order:**
 
@@ -102,6 +103,16 @@ kflow apply [OPTIONS] [NAMES...]
 
 Namespace auto-creation is **disabled by default**. Enable it with `autoCreateNamespace: true` in the root config (global) or in a resource definition (per-resource). See [configuration.md](configuration.md#autocreatenamespace).
 
+**Server-side apply**
+
+Pass `--server-side` when you hit errors like:
+
+```
+metadata.annotations: Too long: must have at most 262144 bytes
+```
+
+This switches every `kubectl apply` call to server-side apply, which moves the field-management bookkeeping into the cluster and lifts the annotation size restriction. It applies to manifests, kustomize overlays, ConfigMaps, Secrets, and auto-created namespaces.
+
 **Examples**
 
 ```bash
@@ -110,6 +121,8 @@ kflow apply traefik                  # apply traefik and its dependencies
 kflow apply --dry-run app            # preview what would run
 kflow apply --no-wait longhorn-storage
 kflow apply --timeout 600 app        # give slow rollouts more time
+kflow apply --server-side            # use server-side apply for all resources
+kflow apply --server-side app        # server-side apply for a specific resource
 ```
 
 ---
@@ -210,6 +223,7 @@ kflow reload [OPTIONS] [NAMES...]
 | `--no-deps` | off | Do not include dependencies. |
 | `--no-wait` | off | Do not wait for rollouts after restarting. |
 | `--timeout SECS` | `300` | Rollout wait timeout. |
+| `--server-side` | off | Use server-side apply when re-applying manifests, ConfigMaps, and Secrets. |
 
 **What it does:**
 
@@ -231,6 +245,7 @@ kflow reload [OPTIONS] [NAMES...]
 kflow reload app                    # re-apply config and restart app pods
 kflow reload --no-wait app
 kflow reload                        # reload everything
+kflow reload --server-side app      # server-side apply for large ConfigMaps/Secrets
 ```
 
 ---
